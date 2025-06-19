@@ -1,8 +1,8 @@
-# DeepSeek-Children-Stories 🚸
+# DeepSeek-Children-Stories 
 
 A state-of-the-art DeepSeek model optimized for children's story generation, featuring advanced architecture with just ~15-18M parameters.
 
-## 🏗️ Architecture Highlights
+## Architecture Highlights
 
 ![DeepSeek Architecture](deepseek-arch.png)
 
@@ -11,14 +11,14 @@ A state-of-the-art DeepSeek model optimized for children's story generation, fea
 - **Multi-token Prediction** - Predicts next 2 tokens simultaneously for efficiency
 - **Rotary Positional Encodings (RoPE)** - Better position understanding
 
-## 📊 Model Specifications
+## Model Specifications
 
 - **Parameters**: ~15-18M (6 layers, 8 heads, 512 embedding dim)
 - **Context Window**: 1024 tokens
 - **Vocabulary**: GPT-2 compatible (50,257 tokens)
 - **Training Data**: 2,000+ children's stories from Hugging Face
 
-## 💻 Hardware Used
+## Hardware Used
 
 Training was performed on the following hardware:
 
@@ -26,7 +26,7 @@ Training was performed on the following hardware:
 - **RAM**: 41 GB
 - **CPU**: 6 vCPU
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Installation
 
@@ -63,7 +63,7 @@ python src/generate.py --prompt "Once upon a time, there was a brave little mous
 python src/generate.py --prompt "A magical forest adventure" --max-tokens 200 --temperature 0.8
 ```
 
-## 🔧 Configuration
+## Configuration
 
 The model can be configured through command-line arguments:
 
@@ -85,7 +85,7 @@ The model can be configured through command-line arguments:
 --multi-token 2      # Multi-token prediction
 ```
 
-## 🎯 Features
+## Features
 
 ### Advanced Architecture
 - **MLA**: Efficient attention with shared key-value heads
@@ -113,25 +113,23 @@ The model achieves:
 - High-quality output suitable for children
 - Scalable architecture for different use cases
 
-## 🤝 Contributing
+## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
-## 📄 License
+## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - DeepSeek team for the original architecture
 - Hugging Face for the children's stories dataset
 - PyTorch team for the excellent framework
 
-## 🔗 Links
+## Links
 
 - **GitHub**: https://github.com/ideaweaver-ai/DeepSeek-Children-Stories-15M-model
-- **Documentation**: [Coming Soon]
-- **Demo**: [Coming Soon]
 
 ---
 
