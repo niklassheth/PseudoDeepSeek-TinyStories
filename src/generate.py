@@ -15,6 +15,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from model.deepseek import DeepSeek, DeepSeekConfig
 
+# Allowlist DeepSeekConfig for safe deserialization
+torch.serialization.add_safe_globals([DeepSeekConfig])
 
 class DeepSeekStoryGenerator:
     def __init__(self, model_path: str, device: str = 'auto'):
@@ -46,14 +48,19 @@ class DeepSeekStoryGenerator:
         print(f"Loading model from {model_path}...")
         
         # Load checkpoint
-        checkpoint = torch.load(model_path, map_location=self.device)
+        checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
         
         # Create model with the same configuration
         config = checkpoint['config']
         model = DeepSeek(config)
         
+        # Handle compiled model state dict by removing _orig_mod prefix
+        state_dict = checkpoint['model']
+        if all(k.startswith('_orig_mod.') for k in state_dict.keys()):
+            state_dict = {k[10:]: v for k, v in state_dict.items()}  # Remove '_orig_mod.' prefix
+        
         # Load model weights
-        model.load_state_dict(checkpoint['model'])
+        model.load_state_dict(state_dict)
         model.to(self.device)
         model.eval()
         
