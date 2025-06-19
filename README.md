@@ -102,6 +102,12 @@ The model can be configured through command-line arguments:
 --multi-token 2      # Multi-token prediction
 ```
 
+## 🤗 Model Available on Hugging Face
+
+The trained model is now available on Hugging Face Hub! You can use it directly:
+
+**Model**: [lakhera2023/deepseek-children-stories](https://huggingface.co/lakhera2023/deepseek-children-stories)
+
 ## Features
 
 ### Advanced Architecture
