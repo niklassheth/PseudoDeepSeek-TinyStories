@@ -53,7 +53,7 @@ class DeepSeekTrainer:
         
         # Initialize gradient scaler for mixed precision training
         if use_mixed_precision and device == 'cuda':
-            self.scaler = torch.cuda.amp.GradScaler()
+            self.scaler = torch.amp.GradScaler('cuda')
         else:
             self.scaler = None
         
@@ -131,7 +131,7 @@ class DeepSeekTrainer:
                     X, Y = self.get_batch(split)
                     with torch.no_grad():
                         if self.scaler is not None:
-                            with torch.cuda.amp.autocast():
+                            with torch.amp.autocast('cuda'):
                                 logits, loss = self.model(X, Y)
                         else:
                             logits, loss = self.model(X, Y)
@@ -229,7 +229,7 @@ class DeepSeekTrainer:
                 
                 # Forward pass with mixed precision
                 if self.scaler is not None:
-                    with torch.cuda.amp.autocast():
+                    with torch.amp.autocast('cuda'):
                         logits, loss = self.model(X, Y)
                 else:
                     logits, loss = self.model(X, Y)

@@ -468,9 +468,25 @@ class DeepSeek(nn.Module):
         """Compute loss for multi-token prediction"""
         batch_size, num_tokens, vocab_size = logits.shape
         
+        # Prepare targets for multi-token prediction
+        # For multi-token prediction, we need targets shifted by 1, 2, ..., num_tokens positions
+        multi_targets = []
+        for i in range(num_tokens):
+            if i + 1 < targets.size(1):
+                # Take targets shifted by (i+1) positions
+                shifted_targets = targets[:, i+1:i+2]  # [batch_size, 1]
+                multi_targets.append(shifted_targets)
+            else:
+                # Pad with -1 (ignore_index) if not enough sequence length
+                pad_targets = torch.full((batch_size, 1), -1, device=targets.device, dtype=targets.dtype)
+                multi_targets.append(pad_targets)
+        
+        # Concatenate to get [batch_size, num_tokens]
+        multi_targets = torch.cat(multi_targets, dim=1)
+        
         # Reshape for loss computation
         logits_flat = logits.view(-1, vocab_size)
-        targets_flat = targets.view(-1)
+        targets_flat = multi_targets.view(-1)
         
         # Compute cross-entropy loss
         loss = F.cross_entropy(logits_flat, targets_flat, ignore_index=-1)
