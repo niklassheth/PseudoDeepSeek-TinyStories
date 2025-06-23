@@ -49,13 +49,7 @@ class DeepSeekDataProcessor:
         text = text.replace('\n', ' ')  # Replace newlines with spaces
         text = ' '.join(text.split())  # Normalize whitespace
         
-        # Remove any inappropriate content markers (basic filtering)
-        inappropriate_phrases = ['adult content', 'mature', 'explicit']
-        for phrase in inappropriate_phrases:
-            if phrase in text:
-                return ""
-        
-        # Ensure the text is child-friendly
+        # Ensure minimum length
         if len(text) < self.min_length:
             return ""
             
