@@ -185,12 +185,27 @@ if __name__ == "__main__":
     print("Testing train dataloader...")
     train_loader = dataloaders['train']
     
+    # Initialize tokenizer for decoding
+    tokenizer = tiktoken.get_encoding("gpt2")
+    
     # Test a few batches
     for i, batch in enumerate(train_loader):
         print(f"Batch {i+1}:")
         print(f"  Input shape: {batch['input_ids'].shape}")
         print(f"  Target shape: {batch['targets'].shape}")
         print(f"  Sample tokens: {batch['input_ids'][0][:20].tolist()}")
+        
+        # Decode and show the actual text
+        sample_tokens = batch['input_ids'][0]
+        # Find where real tokens end (before padding zeros)
+        nonzero_tokens = sample_tokens[sample_tokens != 0]
+        if len(nonzero_tokens) > 0:
+            # Take first 100 tokens for readability
+            display_tokens = nonzero_tokens[:100].tolist()
+            decoded_text = tokenizer.decode(display_tokens)
+            print(f"  Decoded text: '{decoded_text[:200]}...'")
+        
+        print()  # Empty line for readability
         
         if i >= 2:  # Test first few batches
             break
