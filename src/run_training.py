@@ -50,7 +50,7 @@ class TrainingConfig:
     quantization_bits: int = 8
     
     # Training configuration
-    batch_size: int = 12
+    batch_size: int = 32
     max_iters: int = 20000
     eval_interval: int = 1000
     eval_iters: int = 200
