@@ -101,6 +101,10 @@ class DeepSeekTrainer:
             
             # Move to device
             x, y = x.to(self.device), y.to(self.device)
+            
+            # Debug: Print actual batch shapes
+            print(f"DEBUG: Batch size config: {self.batch_size}, Actual X shape: {x.shape}, Y shape: {y.shape}")
+            
             return x, y
         except Exception as e:
             print(f"Error in get_batch: {str(e)}")
@@ -226,6 +230,12 @@ class DeepSeekTrainer:
                 lr = self.get_lr(iter_num)
                 for param_group in self.optimizer.param_groups:
                     param_group['lr'] = lr
+                
+                # Debug: Monitor GPU memory
+                if iter_num % 100 == 0 and torch.cuda.is_available():
+                    memory_used = torch.cuda.memory_allocated() / 1024**3
+                    memory_cached = torch.cuda.memory_reserved() / 1024**3
+                    print(f"DEBUG iter {iter_num}: GPU memory allocated: {memory_used:.2f}GB, cached: {memory_cached:.2f}GB")
                 
                 # Forward pass with mixed precision
                 if self.scaler is not None:
