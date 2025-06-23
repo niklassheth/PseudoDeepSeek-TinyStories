@@ -11,8 +11,7 @@ import torch
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from model.deepseek import DeepSeek, DeepSeekConfig
-from training.trainer import DeepSeekTrainer, create_deepseek_trainer
-from data.data_processor import DeepSeekDataProcessor
+from training.trainer import DeepSeekTrainerV2
 from config import get_model_config, get_training_config
 
 
@@ -98,33 +97,37 @@ def train_model(model, model_config, training_config, device, use_mixed_precisio
         # Create optimizer
         optimizer = create_optimizer(model, training_config)
         
-        # Initialize trainer
-        trainer = DeepSeekTrainer(
+        # Initialize modern trainer with DataLoader
+        trainer = DeepSeekTrainerV2(
             model=model,
             optimizer=optimizer,
             device=device,
             batch_size=training_config.batch_size,
+            max_epochs=training_config.max_epochs,
             max_iters=training_config.max_iters,
             eval_interval=training_config.eval_interval,
-            eval_iters=training_config.eval_iters,
             learning_rate=training_config.learning_rate,
             weight_decay=training_config.weight_decay,
             warmup_iters=training_config.warmup_iters,
             lr_decay_iters=training_config.lr_decay_iters,
             min_lr=training_config.min_lr,
             checkpoint_dir=training_config.checkpoint_dir,
-            use_mixed_precision=use_mixed_precision
+            use_mixed_precision=use_mixed_precision,
+            num_workers=training_config.num_workers,
+            streaming=training_config.streaming,
+            gradient_accumulation_steps=training_config.gradient_accumulation_steps
         )
         
         print("=" * 50)
         print(f"Training Configuration:")
         print(f"  - Batch size: {training_config.batch_size}")
+        print(f"  - Max epochs: {training_config.max_epochs}")
         print(f"  - Max iterations: {training_config.max_iters}")
         print(f"  - Learning rate: {training_config.learning_rate}")
         print(f"  - Weight decay: {training_config.weight_decay}")
-        print(f"  - Warmup iterations: {training_config.warmup_iters}")
-        print(f"  - LR decay iterations: {training_config.lr_decay_iters}")
-        print(f"  - Min learning rate: {training_config.min_lr}")
+        print(f"  - Num workers: {training_config.num_workers}")
+        print(f"  - Streaming: {training_config.streaming}")
+        print(f"  - Gradient accumulation: {training_config.gradient_accumulation_steps}")
         print("=" * 50)
         
         # Start training
@@ -159,16 +162,11 @@ def main():
     # Setup device and precision
     device, use_mixed_precision = setup_device_and_precision(training_config)
     
-    # Prepare dataset
-    print("\nPreparing dataset...")
-    processor = DeepSeekDataProcessor()
-    processor.prepare_dataset()
-    
     # Create model
     print("\nCreating model...")
     model, deepseek_config = create_model(model_config, training_config, device)
     
-    # Train model
+    # Train model (DataLoader handles dataset preparation automatically)
     print("\nStarting training...")
     train_model(model, model_config, training_config, device, use_mixed_precision)
 

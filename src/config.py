@@ -43,14 +43,19 @@ class TrainingConfig:
     """Training configuration"""
     # Training parameters
     batch_size: int = 32  # Set to your desired batch size
-    max_iters: int = 20000
-    eval_interval: int = 1000
-    eval_iters: int = 200
+    max_epochs: int = 1  # Number of epochs to train
+    max_iters: int = None  # Optional limit on iterations (None = no limit)
+    eval_interval: int = 1000  # How often to evaluate
     learning_rate: float = 6e-4
     weight_decay: float = 0.1
     warmup_iters: int = 2000
     lr_decay_iters: int = 20000
     min_lr: float = 6e-5
+    
+    # Data loading configuration
+    num_workers: int = 4  # Number of data loading workers
+    streaming: bool = True  # Use streaming datasets for memory efficiency
+    gradient_accumulation_steps: int = 1  # Gradient accumulation for larger effective batch size
     
     # System configuration
     checkpoint_dir: str = 'checkpoints'
