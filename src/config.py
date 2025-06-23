@@ -42,7 +42,7 @@ class ModelConfig:
 class TrainingConfig:
     """Training configuration"""
     # Training parameters
-    batch_size: int = 256  # Set to your desired batch size
+    batch_size: int = 32  # Set to your desired batch size
     max_iters: int = 20000
     eval_interval: int = 1000
     eval_iters: int = 200
