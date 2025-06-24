@@ -6,7 +6,7 @@ Memory-efficient training with proper epoch management
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from tqdm.auto import tqdm
 import os
 import time
@@ -66,7 +66,7 @@ class DeepSeekTrainerV2:
         
         # Initialize gradient scaler for mixed precision
         if use_mixed_precision and device == 'cuda':
-            self.scaler = GradScaler()
+            self.scaler = GradScaler('cuda')
         else:
             self.scaler = None
         
@@ -82,9 +82,7 @@ class DeepSeekTrainerV2:
         print("Creating dataloaders...")
         self.dataloaders = create_dataloaders(
             batch_size=batch_size,
-            max_length=model.config.block_size,
-            num_workers=num_workers,
-            streaming=streaming
+            num_workers=num_workers
         )
         
         print(f"DataLoaders created:")
@@ -132,7 +130,7 @@ class DeepSeekTrainerV2:
                 
                 # Forward pass
                 if self.scaler is not None and self.device == 'cuda':
-                    with autocast():
+                    with autocast('cuda'):
                         logits, loss = self.model(input_ids, targets)
                 else:
                     logits, loss = self.model(input_ids, targets)
@@ -211,7 +209,7 @@ class DeepSeekTrainerV2:
             
             # Forward pass with gradient accumulation
             if self.scaler is not None:
-                with autocast():
+                with autocast('cuda'):
                     logits, loss = self.model(input_ids, targets)
                     loss = loss / self.gradient_accumulation_steps
                 
