@@ -450,7 +450,7 @@ class DeepSeek(nn.Module):
                 # Standard single-token prediction
                 logits = self.lm_head(x)
                 loss = F.cross_entropy(logits.view(-1, logits.size(-1)), 
-                                     targets.view(-1), ignore_index=-1)
+                                     targets.view(-1), ignore_index=-100)
             
             # Add MoE auxiliary loss
             if router_logits_list:
@@ -489,7 +489,7 @@ class DeepSeek(nn.Module):
         targets_flat = multi_targets.view(-1)
         
         # Compute cross-entropy loss
-        loss = F.cross_entropy(logits_flat, targets_flat, ignore_index=-1)
+        loss = F.cross_entropy(logits_flat, targets_flat, ignore_index=-100)
         
         return loss
     

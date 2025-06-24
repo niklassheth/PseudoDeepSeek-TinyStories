@@ -1,213 +1,131 @@
 """
-Simple DataLoader for TinyStories Dataset
-Using official HuggingFace patterns with minimal preprocessing
+Simple and Fast DataLoader for TinyStories Dataset
+Maximum simplicity with native multiprocessing for speed
 """
 
+from multiprocessing import cpu_count
 import torch
 from torch.utils.data import DataLoader
-from datasets import load_dataset
+from torch.nn.utils.rnn import pad_sequence
+from datasets import load_dataset, Dataset
 import tiktoken
-from typing import Dict, Optional
+from typing import Dict, List, Any, cast
 
 
-def tokenize_function(examples, tokenizer, max_length=1024):
-    """Simple tokenization function"""
-    # Tokenize the texts
-    tokenized = tokenizer.encode_batch(examples["text"])
+def fast_collate_fn(batch: List[Dict[str, List[int]]]) -> Dict[str, torch.Tensor]:
+    """Fast collate function using PyTorch's optimized pad_sequence"""
+    # Convert to tensors
+    input_ids_list = [torch.tensor(item["input_ids"], dtype=torch.long) for item in batch]
     
-    # Truncate to max_length
-    input_ids = []
-    for tokens in tokenized:
-        if len(tokens) > max_length:
-            tokens = tokens[:max_length]
-        input_ids.append(tokens)
+    # Pad sequences efficiently
+    input_ids = pad_sequence(input_ids_list, batch_first=True, padding_value=0)
     
-    return {"input_ids": input_ids}
-
-
-def collate_fn(batch):
-    """Simple collate function for language modeling"""
-    # Get all input_ids from the batch
-    input_ids = [torch.tensor(item["input_ids"], dtype=torch.long) for item in batch]
-    
-    # Find max length in batch
-    max_len = max(len(seq) for seq in input_ids)
-    
-    # Pad sequences to same length
-    padded_input_ids = []
-    for seq in input_ids:
-        if len(seq) < max_len:
-            # Pad with zeros (we'll mask these in loss calculation)
-            padding = torch.zeros(max_len - len(seq), dtype=torch.long)
-            padded_seq = torch.cat([seq, padding])
-        else:
-            padded_seq = seq
-        padded_input_ids.append(padded_seq)
-    
-    # Stack into batch tensor
-    input_ids = torch.stack(padded_input_ids)
+    # Create attention mask
+    attention_mask = pad_sequence(
+        [torch.ones(len(seq), dtype=torch.long) for seq in input_ids_list],
+        batch_first=True, 
+        padding_value=0
+    )
     
     # Create targets (shifted by 1 for language modeling)
-    targets = torch.zeros_like(input_ids)
-    targets[:, :-1] = input_ids[:, 1:]
-    targets[:, -1] = -1  # Special token for padding/end
+    targets = input_ids.clone()
+    targets[:, :-1] = targets[:, 1:]
+    targets[:, -1] = -100
+    targets[attention_mask == 0] = -100  # Mask padding
     
     return {
         "input_ids": input_ids,
-        "targets": targets
+        "targets": targets,
+        "attention_mask": attention_mask
     }
 
 
-def create_simple_dataloaders(
+def create_dataloaders(
     batch_size: int = 32,
-    max_length: int = 1024,
-    num_workers: int = 4,
-    streaming: bool = True,
+    num_workers: int = 2,
     dataset_name: str = "roneneldan/TinyStories"
 ) -> Dict[str, DataLoader]:
     """
-    Create simple DataLoaders for TinyStories dataset
+    Create simple, fast DataLoaders with batch tokenization
     
     Args:
-        batch_size: Batch size
-        max_length: Maximum sequence length
-        num_workers: Number of data loading workers
-        streaming: Whether to use streaming mode
+        batch_size: Batch size for training
+        num_workers: DataLoader workers (keep low, 1-2)
         dataset_name: HuggingFace dataset name
-    
-    Returns:
-        Dictionary with train and validation dataloaders
     """
     
     print(f"Loading {dataset_name} dataset...")
-    print(f"Streaming: {streaming}, Batch size: {batch_size}, Max length: {max_length}")
     
     # Initialize tokenizer
     tokenizer = tiktoken.get_encoding("gpt2")
     
-    # Load dataset
-    if streaming:
-        dataset = load_dataset(dataset_name, streaming=True)
-    else:
-        dataset = load_dataset(dataset_name)
-    
-    # Simple tokenization using map
-    def simple_tokenize(examples):
-        # Just tokenize the text directly
-        texts = examples["text"]
-        tokenized_texts = []
-        
-        for text in texts:
-            # Simple tokenization
-            tokens = tokenizer.encode(text)
-            
-            # Truncate if too long
-            if len(tokens) > max_length:
-                tokens = tokens[:max_length]
-            
-            # Skip if too short
-            if len(tokens) < 10:
-                tokens = []
-            
-            tokenized_texts.append(tokens)
-        
-        return {"input_ids": tokenized_texts}
+    def tokenize_batch(examples: Dict[str, List[str]]) -> Dict[str, List[List[int]]]:
+        """Simple batch tokenization"""
+        return {"input_ids": tokenizer.encode_batch(examples["text"])}
     
     dataloaders = {}
     
-    # Process train and validation splits
+    # Process both splits
     for split_name in ["train", "validation"]:
         print(f"Processing {split_name} split...")
         
-        # Get the split
-        split_dataset = dataset[split_name]
+        # Load dataset
+        dataset = cast(Dataset, load_dataset(dataset_name, split=split_name))
         
-        # Apply tokenization
-        tokenized_dataset = split_dataset.map(
-            simple_tokenize,
+        # Fast batch tokenization
+        tokenized_dataset = dataset.map(
+            tokenize_batch,
             batched=True,
-            remove_columns=["text"]  # Remove original text column
+            batch_size=1000,
+            num_proc=cpu_count(),
+            remove_columns=["text"]
         )
         
-        # Filter out empty sequences
-        if not streaming:
-            tokenized_dataset = tokenized_dataset.filter(lambda x: len(x["input_ids"]) > 0)
-        
-        # Set format to PyTorch
-        tokenized_dataset = tokenized_dataset.with_format("torch")
-        
         # Create DataLoader
-        if streaming:
-            # For streaming datasets
-            dataloader = DataLoader(
-                tokenized_dataset,
-                batch_size=batch_size,
-                num_workers=num_workers,
-                collate_fn=collate_fn,
-                pin_memory=True
-            )
-        else:
-            # For regular datasets
-            dataloader = DataLoader(
-                tokenized_dataset,
-                batch_size=batch_size,
-                shuffle=(split_name == "train"),
-                num_workers=num_workers,
-                collate_fn=collate_fn,
-                pin_memory=True,
-                drop_last=True
-            )
+        dataloader = DataLoader(
+            cast(Any, tokenized_dataset),
+            batch_size=batch_size,
+            shuffle=(split_name == "train"),
+            num_workers=num_workers,
+            collate_fn=fast_collate_fn,
+            pin_memory=torch.cuda.is_available(),
+            drop_last=True,
+            persistent_workers=True if num_workers > 0 else False
+        )
         
         dataloaders[split_name] = dataloader
-        print(f"✅ {split_name} DataLoader created")
+        print(f"✅ {split_name} DataLoader ready")
     
     return dataloaders
 
 
-# Backward compatibility function
-def create_dataloaders(*args, **kwargs):
-    """Backward compatibility wrapper"""
-    return create_simple_dataloaders(*args, **kwargs)
-
-
 if __name__ == "__main__":
-    # Test the simple dataloader
-    print("Testing Simple TinyStories DataLoader...")
+    print("Testing Simple Fast DataLoader...")
     
-    # Test with small batch for quick verification
-    dataloaders = create_simple_dataloaders(
-        batch_size=4, 
-        max_length=512, 
-        streaming=True,
-        num_workers=0  # Use 0 for testing to avoid multiprocessing issues
+    # Test with optimal settings
+    dataloaders = create_dataloaders(
+        batch_size=8,
+        num_workers=1
     )
     
-    print("Testing train dataloader...")
     train_loader = dataloaders['train']
-    
-    # Initialize tokenizer for decoding
     tokenizer = tiktoken.get_encoding("gpt2")
     
-    # Test a few batches
+    # Quick test
+    import time
+    start_time = time.time()
+    
     for i, batch in enumerate(train_loader):
-        print(f"Batch {i+1}:")
-        print(f"  Input shape: {batch['input_ids'].shape}")
-        print(f"  Target shape: {batch['targets'].shape}")
-        print(f"  Sample tokens: {batch['input_ids'][0][:20].tolist()}")
+        if i == 0:
+            print(f"Batch shape: {batch['input_ids'].shape}")
+            # Decode sample
+            real_tokens = batch['input_ids'][0][batch['attention_mask'][0] == 1]
+            text = tokenizer.decode(real_tokens[:30].tolist())
+            print(f"Sample: '{text}...'")
         
-        # Decode and show the actual text
-        sample_tokens = batch['input_ids'][0]
-        # Find where real tokens end (before padding zeros)
-        nonzero_tokens = sample_tokens[sample_tokens != 0]
-        if len(nonzero_tokens) > 0:
-            # Take first 100 tokens for readability
-            display_tokens = nonzero_tokens[:100].tolist()
-            decoded_text = tokenizer.decode(display_tokens)
-            print(f"  Decoded text: '{decoded_text[:200]}...'")
-        
-        print()  # Empty line for readability
-        
-        if i >= 2:  # Test first few batches
+        if i >= 4:
             break
     
-    print("✅ Simple DataLoader test completed successfully!")
+    elapsed = time.time() - start_time
+    print(f"Processed 5 batches in {elapsed:.2f}s ({5/elapsed:.1f} batches/sec)")
+    print("✅ Test complete!")
