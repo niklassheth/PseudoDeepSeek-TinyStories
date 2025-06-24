@@ -50,8 +50,6 @@ def analyze_dataset(max_samples: int = 50000, batch_size: int = 64):
     token_counts = Counter()
     total_tokens = 0
     samples_processed = 0
-    long_sequences = []  # Store sequences >512 tokens
-    max_long_examples = 3  # How many long sequence examples to keep
     
     print(f"\n📈 Processing batches...")
     start_time = time.time()
@@ -69,18 +67,6 @@ def analyze_dataset(max_samples: int = 50000, batch_size: int = 64):
             
             # Get actual tokens (excluding padding)
             tokens = input_ids[seq_idx][:seq_len].tolist()
-            
-            # Store long sequences (>512 tokens) for examples
-            if seq_len > 512 and len(long_sequences) < max_long_examples:
-                try:
-                    decoded_text = tokenizer.decode(tokens)
-                    long_sequences.append({
-                        'length': seq_len,
-                        'tokens': tokens,
-                        'text': decoded_text
-                    })
-                except:
-                    pass  # Skip if decode fails
             
             # Count tokens
             for token in tokens:
@@ -228,51 +214,11 @@ def analyze_dataset(max_samples: int = 50000, batch_size: int = 64):
     print(f"Rare tokens (< {freq_threshold} uses): {len(rare_tokens):,}")
     print(f"Effective vocab (90% coverage): {idx_90:,}")
     
-    # Show long sequence examples
-    if long_sequences:
-        print(f"\n" + "="*50)
-        print("📏 LONG SEQUENCE EXAMPLES (>512 tokens)")
-        print("="*50)
-        for i, seq in enumerate(long_sequences):
-            print(f"\n🔍 Example {i+1} (Length: {seq['length']} tokens):")
-            print("-" * 60)
-            # Show first 500 characters to keep it readable
-            text_preview = seq['text'][:500]
-            if len(seq['text']) > 500:
-                text_preview += "..."
-            print(text_preview)
-            print("-" * 60)
-    else:
-        print(f"\n📏 No sequences longer than 512 tokens found in sample")
-    
-    # Show tokens that occur exactly once
-    single_occurrence_tokens = [(token_id, count) for token_id, count in token_counts.items() if count == 1]
-    print(f"\n" + "="*50)
-    print("🦄 TOKENS OCCURRING EXACTLY ONCE")
-    print("="*50)
-    print(f"Found {len(single_occurrence_tokens):,} tokens that occur exactly once")
-    
-    if single_occurrence_tokens:
-        print(f"\n🔍 Examples of tokens occurring exactly once:")
-        # Show up to 10 examples
-        examples_to_show = min(10, len(single_occurrence_tokens))
-        for i, (token_id, count) in enumerate(single_occurrence_tokens[:examples_to_show]):
-            try:
-                token_str = tokenizer.decode([token_id])
-                print(f"{i+1:2d}. Token {token_id:5d}: '{token_str}' (repr: {repr(token_str)})")
-            except:
-                print(f"{i+1:2d}. Token {token_id:5d}: [DECODE ERROR]")
-        
-        if len(single_occurrence_tokens) > examples_to_show:
-            print(f"... and {len(single_occurrence_tokens) - examples_to_show:,} more")
-    
     return {
         'sequence_lengths': seq_lengths,
         'token_counts': token_counts,
         'unused_tokens': unused_tokens,
         'rare_tokens': rare_tokens,
-        'long_sequences': long_sequences,
-        'single_occurrence_tokens': single_occurrence_tokens,
         'vocab_utilization': len(used_tokens) / vocab_size,
         'effective_vocab_90': idx_90,
         'effective_vocab_99': idx_99
