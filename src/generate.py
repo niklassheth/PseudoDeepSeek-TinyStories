@@ -55,7 +55,7 @@ class DeepSeekStoryGenerator:
         model = DeepSeek(config)
         
         # Handle compiled model state dict by removing _orig_mod prefix
-        state_dict = checkpoint['model']
+        state_dict = checkpoint['model_state_dict']
         if all(k.startswith('_orig_mod.') for k in state_dict.keys()):
             state_dict = {k[10:]: v for k, v in state_dict.items()}  # Remove '_orig_mod.' prefix
         
