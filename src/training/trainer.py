@@ -298,7 +298,7 @@ class DeepSeekTrainerV2:
         
         return avg_loss
     
-    def run_profiling_session(self, num_steps: int = 20):
+    def run_profiling_session(self, num_steps: int = 2):
         """Run a dedicated profiling session"""
         print("\n🔍 Starting dedicated profiling session...")
         
@@ -321,7 +321,7 @@ class DeepSeekTrainerV2:
         performance_analysis = self.profile_training_step(num_steps=num_steps)
         
         print("\n🧠 Running memory profiling...")
-        memory_analysis = self.profile_memory_usage(num_steps=min(num_steps, 10))
+        memory_analysis = self.profile_memory_usage(num_steps=min(num_steps, 3))
         
         print("\n✅ Comprehensive profiling session complete!")
         print("\n📊 Available Analysis:")
@@ -442,7 +442,7 @@ class DeepSeekTrainerV2:
                 print(f"  GPU Utilization: {stats['nvml_gpu_util_percent']}%, Memory Utilization: {stats['nvml_memory_util_percent']}%")
                 print(f"  NVML Memory: {stats['nvml_used_gb']:.2f}GB / {stats['nvml_total_gb']:.2f}GB")
     
-    def profile_training_step(self, num_steps: int = 20, warmup_steps: int = 5) -> str:
+    def profile_training_step(self, num_steps: int = 3, warmup_steps: int = 1) -> str:
         """Profile training steps and return analysis"""
         print(f"🔍 Starting profiling for {num_steps} steps (warmup: {warmup_steps})...")
         
@@ -655,7 +655,7 @@ class DeepSeekTrainerV2:
         
         return summary
     
-    def profile_memory_usage(self, num_steps: int = 10) -> str:
+    def profile_memory_usage(self, num_steps: int = 3) -> str:
         """Detailed memory profiling with PyTorch memory snapshots"""
         print(f"\n🧠 Starting memory profiling for {num_steps} steps...")
         

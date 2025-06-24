@@ -187,7 +187,7 @@ def main():
     
     parser = argparse.ArgumentParser(description='DeepSeek Children\'s Stories Training')
     parser.add_argument('--profile', action='store_true', help='Run profiling mode instead of training')
-    parser.add_argument('--profile-steps', type=int, default=20, help='Number of steps to profile')
+    parser.add_argument('--profile-steps', type=int, default=3, help='Number of steps to profile')
     args = parser.parse_args()
     
     print("DeepSeek Children's Stories Training")
