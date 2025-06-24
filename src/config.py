@@ -21,8 +21,8 @@ class ModelConfig:
     # MLA (Multihead Latent Attention) config
     use_mla: bool = True
     mla_kv_heads: int = 4
-    mla_q_lora_rank: int = 32
-    mla_kv_lora_rank: int = 16
+    mla_q_proj_dim: int = 32
+    mla_kv_proj_dim: int = 16
     
     # MoE (Mixture of Experts) config
     moe_num_experts: int = 4

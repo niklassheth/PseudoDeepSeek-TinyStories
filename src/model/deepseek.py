@@ -31,8 +31,8 @@ class DeepSeekConfig:
     # MLA (Multihead Latent Attention) config
     use_mla: bool = True     # Enable MLA
     mla_kv_heads: int = 4    # Number of key-value heads for MLA
-    mla_q_lora_rank: int = 32  # LoRA rank for query projection
-    mla_kv_lora_rank: int = 16  # LoRA rank for key-value projection
+    mla_q_proj_dim: int = 32  # Query projection dimension
+    mla_kv_proj_dim: int = 16  # Key-value projection dimension
     
     # MoE (Mixture of Experts) config
     moe_num_experts: int = 4  # Number of experts
@@ -119,7 +119,7 @@ class RoPEPositionalEncoding(nn.Module):
 class MultiheadLatentAttention(nn.Module):
     """
     Multihead Latent Attention (MLA) - DeepSeek's efficient attention mechanism
-    Uses shared key-value heads with LoRA-style projections for efficiency
+    Uses shared key-value heads with projection decomposition for efficiency
     """
     
     def __init__(self, config: DeepSeekConfig):
@@ -131,13 +131,13 @@ class MultiheadLatentAttention(nn.Module):
         self.kv_heads = config.mla_kv_heads
         self.kv_head_dim = self.head_dim
         
-        # Query projection with LoRA-style decomposition
-        self.q_a_proj = nn.Linear(config.n_embd, config.mla_q_lora_rank, bias=False)
-        self.q_b_proj = nn.Linear(config.mla_q_lora_rank, config.n_embd, bias=False)
+        # Query projection with decomposition
+        self.q_a_proj = nn.Linear(config.n_embd, config.mla_q_proj_dim, bias=False)
+        self.q_b_proj = nn.Linear(config.mla_q_proj_dim, config.n_embd, bias=False)
         
         # Key-Value projection with shared heads
-        self.kv_a_proj = nn.Linear(config.n_embd, config.mla_kv_lora_rank, bias=False)
-        self.kv_b_proj = nn.Linear(config.mla_kv_lora_rank, self.kv_heads * self.head_dim * 2, bias=False)
+        self.kv_a_proj = nn.Linear(config.n_embd, config.mla_kv_proj_dim, bias=False)
+        self.kv_b_proj = nn.Linear(config.mla_kv_proj_dim, self.kv_heads * self.head_dim * 2, bias=False)
         
         # Output projection
         self.out_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
@@ -154,7 +154,7 @@ class MultiheadLatentAttention(nn.Module):
     def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
         batch_size, seq_len, _ = x.shape
         
-        # Query projection through LoRA-style decomposition
+        # Query projection through decomposition
         q_latent = self.q_a_proj(x)  # [B, T, rank]
         q = self.q_b_proj(q_latent)  # [B, T, n_embd]
         q = q.view(batch_size, seq_len, self.n_head, self.head_dim)

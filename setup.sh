@@ -15,7 +15,6 @@ NC='\033[0m' # No Color
 PROJECT_ROOT="${PROJECT_ROOT:-$(pwd)}"
 VENV_PATH="${VENV_PATH:-${PROJECT_ROOT}/venv}"
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-${PROJECT_ROOT}/checkpoints}"
-LORA_CHECKPOINT_DIR="${LORA_CHECKPOINT_DIR:-${PROJECT_ROOT}/lora_checkpoints}"
 REQUIRED_SPACE_MB="${REQUIRED_SPACE_MB:-2000}"
 
 # Function to print status messages
@@ -81,7 +80,7 @@ create_project_structure() {
             "${PROJECT_ROOT}/src/training" \
             "${PROJECT_ROOT}/src/inference" \
             "${CHECKPOINT_DIR}" \
-            "${LORA_CHECKPOINT_DIR}" || handle_error "Failed to create directories"
+|| handle_error "Failed to create directories"
 }
 
 # Function to setup virtual environment
@@ -126,63 +125,6 @@ train_base_model() {
     python3 src/run_training.py || handle_error "Base model training failed"
 }
 
-# Function to perform LoRA finetuning
-finetune_lora() {
-    while true; do
-        read -p "Do you want to perform LoRA finetuning? (y/n) " do_finetune
-        case $do_finetune in
-            [Yy]* )
-                print_status "Starting LoRA finetuning..."
-                cd "${PROJECT_ROOT}" || handle_error "Failed to change to project directory"
-                
-                # Create LoRA finetuning script
-                cat > finetune_lora.py << 'EOF'
-import torch
-import os
-import sys
-sys.path.append('src')
-
-from model.deepseek import DeepSeek, DeepSeekConfig
-from peft import get_peft_model, LoraConfig, TaskType
-
-def main():
-    print("Loading base model...")
-    checkpoint = torch.load('checkpoints/best_model.pt', map_location='cuda' if torch.cuda.is_available() else 'cpu')
-    model = DeepSeek(checkpoint['config'])
-    model.load_state_dict(checkpoint['model_state_dict'])
-    
-    # Define LoRA configuration
-    lora_config = LoraConfig(
-        task_type=TaskType.CAUSAL_LM,
-        r=8,  # rank
-        lora_alpha=32,
-        lora_dropout=0.1,
-        target_modules=["q_a_proj", "q_b_proj", "kv_a_proj", "kv_b_proj"]
-    )
-    
-    # Get PEFT model
-    model = get_peft_model(model, lora_config)
-    model.print_trainable_parameters()
-    
-    print("LoRA finetuning setup complete!")
-
-if __name__ == "__main__":
-    main()
-EOF
-                
-                python3 finetune_lora.py || handle_error "LoRA finetuning failed"
-                break
-                ;;
-            [Nn]* )
-                print_status "Skipping LoRA finetuning..."
-                break
-                ;;
-            * )
-                echo "Please answer 'y' or 'n'"
-                ;;
-        esac
-    done
-}
 
 # Function to test the trained model
 test_model() {
@@ -278,9 +220,6 @@ main() {
     
     # Train base model
     train_base_model
-    
-    # Optional LoRA finetuning
-    finetune_lora
     
     # Optional model testing
     test_model
