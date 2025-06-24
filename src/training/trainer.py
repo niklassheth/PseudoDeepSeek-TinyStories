@@ -442,7 +442,7 @@ class DeepSeekTrainerV2:
                 print(f"  GPU Utilization: {stats['nvml_gpu_util_percent']}%, Memory Utilization: {stats['nvml_memory_util_percent']}%")
                 print(f"  NVML Memory: {stats['nvml_used_gb']:.2f}GB / {stats['nvml_total_gb']:.2f}GB")
     
-    def profile_training_step(self, num_steps: int = 3, warmup_steps: int = 1) -> str:
+    def profile_training_step(self, num_steps: int = 3, warmup_steps: int = 5) -> str:
         """Profile training steps and return analysis"""
         print(f"🔍 Starting profiling for {num_steps} steps (warmup: {warmup_steps})...")
         
