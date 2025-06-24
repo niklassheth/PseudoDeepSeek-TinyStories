@@ -93,14 +93,6 @@ class DeepSeekTrainerV2:
         print(f"  - Num workers: {num_workers}")
         print(f"  - Max length: {model.config.block_size}")
         
-        # Fix the model's loss function to use correct ignore_index
-        self._fix_model_ignore_index()
-    
-    def _fix_model_ignore_index(self):
-        """Update model to use -100 as ignore_index for consistency with dataloader"""
-        # This is a quick fix - ideally this should be in model config
-        print("Note: The model uses ignore_index=-1, but dataloader uses -100.")
-        print("Consider updating the model's loss calculation to use ignore_index=-100")
     
     def get_lr(self, it: int) -> float:
         """Get learning rate for current iteration"""
