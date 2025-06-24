@@ -6,7 +6,8 @@ Memory-efficient training with proper epoch management
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from torch.amp import GradScaler, autocast
+from torch.amp.grad_scaler import GradScaler
+from torch.amp.autocast_mode import autocast
 from tqdm.auto import tqdm
 import os
 import time
@@ -82,7 +83,8 @@ class DeepSeekTrainerV2:
         print("Creating dataloaders...")
         self.dataloaders = create_dataloaders(
             batch_size=batch_size,
-            num_workers=num_workers
+            num_workers=num_workers,
+            max_length=model.config.block_size
         )
         
         print(f"DataLoaders created:")

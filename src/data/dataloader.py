@@ -43,7 +43,8 @@ def fast_collate_fn(batch: List[Dict[str, List[int]]]) -> Dict[str, torch.Tensor
 def create_dataloaders(
     batch_size: int = 32,
     num_workers: int = 2,
-    dataset_name: str = "roneneldan/TinyStories"
+    dataset_name: str = "roneneldan/TinyStories",
+    max_length: int = 1024
 ) -> Dict[str, DataLoader]:
     """
     Create simple, fast DataLoaders with batch tokenization
@@ -60,8 +61,11 @@ def create_dataloaders(
     tokenizer = tiktoken.get_encoding("gpt2")
     
     def tokenize_batch(examples: Dict[str, List[str]]) -> Dict[str, List[List[int]]]:
-        """Simple batch tokenization"""
-        return {"input_ids": tokenizer.encode_batch(examples["text"])}
+        """Simple batch tokenization with max length truncation"""
+        tokenized = tokenizer.encode_batch(examples["text"])
+        # Truncate sequences that are too long
+        truncated = [seq[:max_length] for seq in tokenized]
+        return {"input_ids": truncated}
     
     dataloaders = {}
     
@@ -105,7 +109,8 @@ if __name__ == "__main__":
     # Test with optimal settings
     dataloaders = create_dataloaders(
         batch_size=8,
-        num_workers=1
+        num_workers=1,
+        max_length=1024
     )
     
     train_loader = dataloaders['train']
