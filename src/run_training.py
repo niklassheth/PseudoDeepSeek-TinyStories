@@ -86,6 +86,46 @@ def create_optimizer(model, training_config):
     return optimizer
 
 
+def run_profiling(model, model_config, training_config, device, use_mixed_precision, num_steps):
+    """Run profiling session"""
+    try:
+        print(f"🔍 Starting profiling session...")
+        
+        # Create optimizer
+        optimizer = create_optimizer(model, training_config)
+        
+        # Initialize trainer
+        trainer = DeepSeekTrainerV2(
+            model=model,
+            optimizer=optimizer,
+            device=device,
+            batch_size=training_config.batch_size,
+            max_epochs=1,  # Not used in profiling
+            max_iters=None,
+            eval_interval=training_config.eval_interval,
+            learning_rate=training_config.learning_rate,
+            warmup_iters=training_config.warmup_iters,
+            lr_decay_iters=training_config.lr_decay_iters,
+            min_lr=training_config.min_lr,
+            checkpoint_dir=training_config.checkpoint_dir,
+            use_mixed_precision=use_mixed_precision,
+            num_workers=training_config.num_workers,
+            streaming=training_config.streaming,
+            gradient_accumulation_steps=training_config.gradient_accumulation_steps
+        )
+        
+        # Run profiling session
+        analysis = trainer.run_profiling_session(num_steps=num_steps)
+        
+        print("✅ Profiling completed successfully!")
+        
+    except Exception as e:
+        print(f"❌ Profiling failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+
 def train_model(model, model_config, training_config, device, use_mixed_precision):
     """Train the model"""
     try:
@@ -143,6 +183,13 @@ def train_model(model, model_config, training_config, device, use_mixed_precisio
 
 def main():
     """Main training function"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='DeepSeek Children\'s Stories Training')
+    parser.add_argument('--profile', action='store_true', help='Run profiling mode instead of training')
+    parser.add_argument('--profile-steps', type=int, default=20, help='Number of steps to profile')
+    args = parser.parse_args()
+    
     print("DeepSeek Children's Stories Training")
     print("=" * 50)
     
@@ -152,6 +199,9 @@ def main():
     
     print(f"Model Config: {model_config.n_layer}L/{model_config.n_head}H/{model_config.n_embd}D")
     print(f"Training Config: Batch size {training_config.batch_size}, {training_config.max_iters} iters")
+    
+    if args.profile:
+        print(f"🔍 PROFILING MODE - Running {args.profile_steps} steps")
     
     # Set random seed for reproducibility
     torch.manual_seed(training_config.seed)
@@ -165,9 +215,13 @@ def main():
     print("\nCreating model...")
     model, deepseek_config = create_model(model_config, training_config, device)
     
-    # Train model (DataLoader handles dataset preparation automatically)
-    print("\nStarting training...")
-    train_model(model, model_config, training_config, device, use_mixed_precision)
+    if args.profile:
+        # Run profiling instead of training
+        run_profiling(model, model_config, training_config, device, use_mixed_precision, args.profile_steps)
+    else:
+        # Train model (DataLoader handles dataset preparation automatically)
+        print("\nStarting training...")
+        train_model(model, model_config, training_config, device, use_mixed_precision)
 
 
 if __name__ == "__main__":
