@@ -444,7 +444,6 @@ class DeepSeekTrainerV2:
     
     def profile_training_step(self, num_steps: int = 3, warmup_steps: int = 5) -> str:
         """Profile training steps and return analysis"""
-        print(f"🔍 Starting profiling for {num_steps} steps (warmup: {warmup_steps})...")
         
         # Reset memory stats
         if torch.cuda.is_available():
@@ -458,10 +457,16 @@ class DeepSeekTrainerV2:
         if torch.cuda.is_available():
             activities.append(torch.profiler.ProfilerActivity.CUDA)
         
+        # Ensure we have enough steps for the schedule
+        total_steps = max(num_steps, warmup_steps + 3)  # At least 3 active steps
+        active_steps = total_steps - warmup_steps
+        
+        print(f"🔍 Starting profiling for {total_steps} steps (warmup: {warmup_steps}, active: {active_steps})...")
+        
         schedule = torch.profiler.schedule(
             wait=1,
             warmup=warmup_steps,
-            active=num_steps - warmup_steps,
+            active=active_steps,
             repeat=1
         )
         
@@ -481,7 +486,7 @@ class DeepSeekTrainerV2:
             step_times = []
             
             for step, batch in enumerate(train_loader):
-                if step >= num_steps:
+                if step >= total_steps:
                     break
                 
                 step_start = time.time()
