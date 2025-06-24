@@ -477,8 +477,8 @@ class DeepSeek(nn.Module):
                 shifted_targets = targets[:, i+1:i+2]  # [batch_size, 1]
                 multi_targets.append(shifted_targets)
             else:
-                # Pad with -1 (ignore_index) if not enough sequence length
-                pad_targets = torch.full((batch_size, 1), -1, device=targets.device, dtype=targets.dtype)
+                # Pad with -100 (ignore_index) if not enough sequence length
+                pad_targets = torch.full((batch_size, 1), -100, device=targets.device, dtype=targets.dtype)
                 multi_targets.append(pad_targets)
         
         # Concatenate to get [batch_size, num_tokens]
