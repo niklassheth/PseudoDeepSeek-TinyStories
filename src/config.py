@@ -14,7 +14,7 @@ class ModelConfig:
     n_layer: int = 6
     n_head: int = 8
     n_embd: int = 512
-    block_size: int = 1024
+    block_size: int = 512
     dropout: float = 0.1
     bias: bool = True
     
