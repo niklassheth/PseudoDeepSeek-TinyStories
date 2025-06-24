@@ -461,7 +461,6 @@ class DeepSeekTrainerV2:
         with torch.profiler.profile(
             activities=activities,
             schedule=schedule,
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(profile_dir),
             record_shapes=True,
             profile_memory=True,
             with_stack=True,
@@ -516,7 +515,15 @@ class DeepSeekTrainerV2:
                 prof.step()
         
         # Export Chrome trace
-        prof.export_chrome_trace(trace_file)
+        try:
+            prof.export_chrome_trace(trace_file)
+            print(f"📁 Chrome trace saved to: {trace_file}")
+        except RuntimeError as e:
+            if "already saved" in str(e):
+                print(f"⚠️  Chrome trace already saved (this is normal)")
+            else:
+                print(f"❌ Could not save Chrome trace: {e}")
+                trace_file = "N/A"
         
         # Analyze results
         analysis = self._analyze_profiling_results(prof, step_times, trace_file)
