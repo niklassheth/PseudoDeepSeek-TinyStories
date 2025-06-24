@@ -24,18 +24,6 @@ class DeepSeekStoryGenerator:
         self.device = self._get_device(device)
         self.model = self._load_model(model_path)
         self.tokenizer = tiktoken.get_encoding("gpt2")
-        
-        # Special tokens for story structure
-        self.special_tokens = {
-            "story_start": "<|story|>",
-            "story_end": "</|story|>",
-            "prompt_start": "<|prompt|>",
-            "prompt_end": "</|prompt|>",
-            "moral_start": "<|moral|>",
-            "moral_end": "</|moral|>",
-            "character_start": "<|character|>",
-            "character_end": "</|character|>"
-        }
     
     def _get_device(self, device: str) -> str:
         """Get the appropriate device"""
@@ -72,13 +60,11 @@ class DeepSeekStoryGenerator:
     
     def encode_prompt(self, prompt: str, character: Optional[str] = None) -> torch.Tensor:
         """Encode a prompt for generation"""
-        # Create structured prompt
-        full_prompt = f"{self.special_tokens['prompt_start']} {prompt.lower()} {self.special_tokens['prompt_end']}"
+        # Simple prompt encoding without special tokens
+        full_prompt = prompt
         
         if character:
-            full_prompt += f" {self.special_tokens['character_start']} {character.lower()} {self.special_tokens['character_end']}"
-        
-        full_prompt += f" {self.special_tokens['story_start']}"
+            full_prompt = f"{character}: {prompt}"
         
         # Tokenize
         token_ids = self.tokenizer.encode_ordinary(full_prompt)
@@ -86,7 +72,7 @@ class DeepSeekStoryGenerator:
     
     def generate_story(self, prompt: str, character: Optional[str] = None, 
                       max_tokens: int = 200, temperature: float = 0.8, 
-                      top_k: int = 40, top_p: float = 0.9) -> str:
+                      top_k: int = 40) -> str:
         """Generate a children's story"""
         print(f"Generating story for prompt: '{prompt}'")
         if character:
@@ -114,21 +100,8 @@ class DeepSeekStoryGenerator:
     
     def _extract_story(self, text: str) -> str:
         """Extract the story from the generated text"""
-        # Find story start and end markers
-        story_start = text.find(self.special_tokens['story_start'])
-        story_end = text.find(self.special_tokens['story_end'])
-        
-        if story_start != -1 and story_end != -1:
-            # Extract story content
-            story_content = text[story_start + len(self.special_tokens['story_start']):story_end].strip()
-            return story_content
-        else:
-            # Fallback: return the text after the last prompt
-            prompt_end = text.find(self.special_tokens['prompt_end'])
-            if prompt_end != -1:
-                return text[prompt_end + len(self.special_tokens['prompt_end']):].strip()
-            else:
-                return text.strip()
+        # Simple extraction - just return the generated text cleaned up
+        return text.strip()
     
     def generate_multiple_stories(self, prompts: List[str], num_stories: int = 3, 
                                 **kwargs) -> List[str]:
