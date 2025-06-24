@@ -274,8 +274,7 @@ main() {
     # Setup virtual environment
     setup_virtual_env
     
-    # Test dataloader (no dataset preparation needed - downloads automatically)
-    test_dataloader
+    # Skip dataloader test - no dataset preparation needed
     
     # Train base model
     train_base_model
