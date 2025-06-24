@@ -107,7 +107,6 @@ def train_model(model, model_config, training_config, device, use_mixed_precisio
             max_iters=training_config.max_iters,
             eval_interval=training_config.eval_interval,
             learning_rate=training_config.learning_rate,
-            weight_decay=training_config.weight_decay,
             warmup_iters=training_config.warmup_iters,
             lr_decay_iters=training_config.lr_decay_iters,
             min_lr=training_config.min_lr,
