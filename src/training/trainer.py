@@ -13,13 +13,8 @@ import os
 import time
 from typing import Dict, Optional, Callable, Any
 import math
-import json
-from contextlib import contextmanager
-from collections import defaultdict
-
 # Profiling imports
 import torch.profiler
-import psutil
 try:
     import nvidia_ml_py3 as nvml
     NVML_AVAILABLE = True
@@ -108,8 +103,6 @@ class DeepSeekTrainerV2:
         
         # Initialize profiling
         self.profiling_active = False
-        self.timing_stats = defaultdict(list)
-        self.profiler = None
         
         # Initialize NVIDIA ML for GPU monitoring
         if torch.cuda.is_available() and NVML_AVAILABLE:
@@ -299,37 +292,20 @@ class DeepSeekTrainerV2:
         return avg_loss
     
     def run_profiling_session(self, num_steps: int = 2):
-        """Run a dedicated profiling session"""
-        print("\n🔍 Starting dedicated profiling session...")
+        """Run profiling session"""
+        print(f"🔍 Profiling {sum(p.numel() for p in self.model.parameters()):,} parameter model")
         
-        # Print model summary
-        model_summary = self.profile_model_summary()
-        print(f"\n📋 Model Summary:")
-        print(f"  Total parameters: {model_summary['model_info']['total_params']:,}")
-        print(f"  Model size: {model_summary['model_info']['model_size_mb']:.1f}MB")
+        # Run performance profiling
+        trace_file = self.profile_training_step(num_steps=num_steps)
         
-        # Print GPU info
-        if model_summary['gpu_info']:
-            print(f"\n🖥️  System Info:")
-            if 'nvml_total_gb' in model_summary['gpu_info']:
-                print(f"  GPU Memory: {model_summary['gpu_info']['nvml_total_gb']:.1f}GB")
-            print(f"  CPU Cores: {model_summary['system_info']['cpu_count']}")
-            print(f"  System Memory: {model_summary['system_info']['memory_gb']:.1f}GB")
+        # Run memory profiling  
+        snapshot_file = self.profile_memory_usage(num_steps=min(num_steps, 3))
         
-        # Run comprehensive profiling
-        print("\n🔍 Running performance profiling...")
-        performance_analysis = self.profile_training_step(num_steps=num_steps)
+        print(f"\n✅ Profiling complete:")
+        print(f"  Chrome trace: {trace_file}")
+        print(f"  Memory snapshot: {snapshot_file}")
         
-        print("\n🧠 Running memory profiling...")
-        memory_analysis = self.profile_memory_usage(num_steps=min(num_steps, 3))
-        
-        print("\n✅ Comprehensive profiling session complete!")
-        print("\n📊 Available Analysis:")
-        print("  - Performance: Chrome trace files for timeline analysis")
-        print("  - Memory: PyTorch memory snapshots for detailed memory analysis")
-        print("  - Reports: Text analysis files with recommendations")
-        
-        return {'performance': performance_analysis, 'memory': memory_analysis}
+        return {'trace': trace_file, 'snapshot': snapshot_file}
     
     def train(self):
         """Main training loop"""
@@ -385,12 +361,6 @@ class DeepSeekTrainerV2:
             print(f"   Total iterations: {self.current_iter}")
             print(f"   Best validation loss: {self.best_val_loss:.4f}")
             
-            # Print timing summary if available
-            if self.timing_stats:
-                print(f"\n⏱️  Training Timing Summary:")
-                for op_name, times in self.timing_stats.items():
-                    avg_time = sum(times) / len(times)
-                    print(f"   {op_name}: {avg_time:.4f}s average")
             
             # Final cleanup
             if torch.cuda.is_available():
@@ -398,13 +368,6 @@ class DeepSeekTrainerV2:
     
     # ==================== PROFILING METHODS ====================
     
-    @contextmanager
-    def timer(self, name: str):
-        """Context manager for timing operations"""
-        start_time = time.time()
-        yield
-        elapsed = time.time() - start_time
-        self.timing_stats[name].append(elapsed)
     
     def get_gpu_stats(self) -> Dict[str, Any]:
         """Get current GPU statistics"""
@@ -443,241 +406,69 @@ class DeepSeekTrainerV2:
                 print(f"  NVML Memory: {stats['nvml_used_gb']:.2f}GB / {stats['nvml_total_gb']:.2f}GB")
     
     def profile_training_step(self, num_steps: int = 3, warmup_steps: int = 5) -> str:
-        """Profile training steps and return analysis"""
-        
-        # Reset memory stats
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
-        
+        """Profile training steps and generate Chrome trace"""
         profile_dir = os.path.join(self.checkpoint_dir, 'profiling')
         os.makedirs(profile_dir, exist_ok=True)
         
-        # Configure profiler
+        # Ensure we have enough steps for the schedule
+        total_steps = max(num_steps, warmup_steps + 3)
+        active_steps = total_steps - warmup_steps
+        
+        print(f"🔍 Performance profiling: {total_steps} steps ({warmup_steps} warmup + {active_steps} active)")
+        
         activities = [torch.profiler.ProfilerActivity.CPU]
         if torch.cuda.is_available():
             activities.append(torch.profiler.ProfilerActivity.CUDA)
         
-        # Ensure we have enough steps for the schedule
-        total_steps = max(num_steps, warmup_steps + 3)  # At least 3 active steps
-        active_steps = total_steps - warmup_steps
-        
-        print(f"🔍 Starting profiling for {total_steps} steps (warmup: {warmup_steps}, active: {active_steps})...")
-        
-        schedule = torch.profiler.schedule(
-            wait=1,
-            warmup=warmup_steps,
-            active=active_steps,
-            repeat=1
-        )
-        
+        schedule = torch.profiler.schedule(wait=1, warmup=warmup_steps, active=active_steps, repeat=1)
         trace_file = os.path.join(profile_dir, f'trace_{int(time.time())}.json')
         
-        with torch.profiler.profile(
-            activities=activities,
-            schedule=schedule,
-            record_shapes=True,
-            profile_memory=True,
-            with_stack=True,
-            with_flops=True
-        ) as prof:
-            
+        with torch.profiler.profile(activities=activities, schedule=schedule, record_shapes=True, profile_memory=True) as prof:
             self.model.train()
             train_loader = self.dataloaders['train']
-            step_times = []
             
             for step, batch in enumerate(train_loader):
                 if step >= total_steps:
                     break
                 
-                step_start = time.time()
-                
-                # Get batch data
                 input_ids = batch['input_ids'].to(self.device)
                 targets = batch['targets'].to(self.device)
                 
-                # Forward and backward pass
-                with self.timer('forward_pass'):
-                    if self.scaler is not None:
-                        with autocast('cuda'):
-                            logits, loss = self.model(input_ids, targets)
-                    else:
-                        logits, loss = self.model(input_ids, targets)
+                if self.scaler is not None:
+                    with autocast('cuda'):
+                        _, loss = self.model(input_ids, targets)
+                    self.scaler.scale(loss).backward()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    _, loss = self.model(input_ids, targets)
+                    loss.backward()
+                    self.optimizer.step()
                 
-                with self.timer('backward_pass'):
-                    if self.scaler is not None:
-                        self.scaler.scale(loss).backward()
-                    else:
-                        loss.backward()
-                
-                with self.timer('optimizer_step'):
-                    if self.scaler is not None:
-                        self.scaler.step(self.optimizer)
-                        self.scaler.update()
-                    else:
-                        self.optimizer.step()
-                    self.optimizer.zero_grad()
-                
-                step_time = time.time() - step_start
-                step_times.append(step_time)
-                
-                # Print progress
-                if step % 5 == 0:
-                    gpu_stats = self.get_gpu_stats()
-                    gpu_util = gpu_stats.get('nvml_gpu_util_percent', 'N/A')
-                    print(f"  Step {step}: {step_time:.3f}s, Loss: {loss.item():.4f}, GPU: {gpu_util}%")
-                
+                self.optimizer.zero_grad(set_to_none=True)
                 prof.step()
         
         # Export Chrome trace
         try:
             prof.export_chrome_trace(trace_file)
-            print(f"📁 Chrome trace saved to: {trace_file}")
-        except RuntimeError as e:
-            if "already saved" in str(e):
-                print(f"⚠️  Chrome trace already saved (this is normal)")
-            else:
-                print(f"❌ Could not save Chrome trace: {e}")
-                trace_file = "N/A"
+            print(f"📁 Chrome trace: {trace_file}")
+        except RuntimeError:
+            print(f"⚠️  Chrome trace export issue (may be saved already)")
         
-        # Analyze results
-        analysis = self._analyze_profiling_results(prof, step_times, trace_file)
-        
-        return analysis
+        return trace_file
     
-    def _analyze_profiling_results(self, prof: torch.profiler.profile, step_times: list, trace_file: str) -> str:
-        """Analyze profiling results and generate report"""
-        analysis_lines = []
-        analysis_lines.append("\n" + "="*60)
-        analysis_lines.append("🔍 PROFILING ANALYSIS REPORT")
-        analysis_lines.append("="*60)
-        
-        # Basic timing stats
-        avg_step_time = sum(step_times) / len(step_times)
-        analysis_lines.append(f"\n📊 Basic Performance:")
-        analysis_lines.append(f"  Average step time: {avg_step_time:.3f}s")
-        analysis_lines.append(f"  Steps per second: {1/avg_step_time:.2f}")
-        analysis_lines.append(f"  Tokens per second: {self.batch_size * self.model.config.block_size / avg_step_time:.0f}")
-        
-        # Memory stats
-        gpu_stats = self.get_gpu_stats()
-        if gpu_stats:
-            analysis_lines.append(f"\n💾 Memory Usage:")
-            if 'torch_max_allocated_gb' in gpu_stats:
-                analysis_lines.append(f"  Peak GPU memory: {gpu_stats['torch_max_allocated_gb']:.2f}GB")
-            if 'nvml_gpu_util_percent' in gpu_stats:
-                analysis_lines.append(f"  GPU utilization: {gpu_stats['nvml_gpu_util_percent']}%")
-                analysis_lines.append(f"  Memory utilization: {gpu_stats['nvml_memory_util_percent']}%")
-        
-        # Top CPU operations
-        analysis_lines.append(f"\n🖥️  Top CPU Operations:")
-        cpu_table = prof.key_averages().table(sort_by="cpu_time_total", row_limit=10)
-        analysis_lines.append(cpu_table)
-        
-        # Top CUDA operations (if available)
-        if torch.cuda.is_available():
-            analysis_lines.append(f"\n🚀 Top CUDA Operations:")
-            cuda_table = prof.key_averages().table(sort_by="cuda_time_total", row_limit=10)
-            analysis_lines.append(cuda_table)
-        
-        # Timing breakdown
-        if self.timing_stats:
-            analysis_lines.append(f"\n⏱️  Operation Timing Breakdown:")
-            for op_name, times in self.timing_stats.items():
-                avg_time = sum(times) / len(times)
-                total_time = sum(times)
-                analysis_lines.append(f"  {op_name}: {avg_time:.4f}s avg, {total_time:.4f}s total ({len(times)} calls)")
-        
-        # Memory efficiency analysis
-        analysis_lines.append(f"\n🧠 Memory Efficiency Analysis:")
-        if 'nvml_gpu_util_percent' in gpu_stats:
-            gpu_util = gpu_stats['nvml_gpu_util_percent']
-            if gpu_util < 70:
-                analysis_lines.append(f"  ⚠️  LOW GPU utilization ({gpu_util}%) - possible CPU bottleneck")
-            elif gpu_util > 95:
-                analysis_lines.append(f"  ✅ HIGH GPU utilization ({gpu_util}%) - good compute efficiency")
-            else:
-                analysis_lines.append(f"  ✅ MODERATE GPU utilization ({gpu_util}%) - room for improvement")
-        
-        # Recommendations
-        analysis_lines.append(f"\n💡 Optimization Recommendations:")
-        analysis_lines.append(f"  1. Check Chrome trace file: {trace_file}")
-        analysis_lines.append(f"  2. Open in Chrome at: chrome://tracing/")
-        analysis_lines.append(f"  3. Look for:")
-        analysis_lines.append(f"     - Long gaps between GPU kernels (data loading bottleneck)")
-        analysis_lines.append(f"     - Inefficient attention patterns (bright yellow blocks)")
-        analysis_lines.append(f"     - Memory allocation spikes (red memory timeline)")
-        analysis_lines.append(f"     - CPU-GPU synchronization issues")
-        
-        analysis_text = "\n".join(analysis_lines)
-        
-        # Save analysis to file
-        analysis_file = os.path.join(os.path.dirname(trace_file), f'analysis_{int(time.time())}.txt')
-        with open(analysis_file, 'w') as f:
-            f.write(analysis_text)
-        
-        print(analysis_text)
-        print(f"\n📁 Analysis saved to: {analysis_file}")
-        
-        return analysis_text
-    
-    def profile_model_summary(self) -> Dict[str, Any]:
-        """Generate a comprehensive model profiling summary"""
-        print("\n🔍 Generating model profiling summary...")
-        
-        summary = {
-            'model_info': {
-                'total_params': sum(p.numel() for p in self.model.parameters()),
-                'trainable_params': sum(p.numel() for p in self.model.parameters() if p.requires_grad),
-                'model_size_mb': sum(p.numel() * p.element_size() for p in self.model.parameters()) / 1e6,
-                'architecture': type(self.model).__name__,
-                'config': self.model.config.__dict__ if hasattr(self.model, 'config') else {}
-            },
-            'gpu_info': self.get_gpu_stats(),
-            'system_info': {
-                'cpu_count': psutil.cpu_count(),
-                'memory_gb': psutil.virtual_memory().total / 1e9,
-                'pytorch_version': torch.__version__,
-                'cuda_available': torch.cuda.is_available()
-            }
-        }
-        
-        # Model layer analysis
-        layer_info = []
-        for name, module in self.model.named_modules():
-            if len(list(module.children())) == 0:  # Leaf modules only
-                params = sum(p.numel() for p in module.parameters())
-                if params > 0:
-                    layer_info.append({
-                        'name': name,
-                        'type': type(module).__name__,
-                        'params': params,
-                        'size_mb': sum(p.numel() * p.element_size() for p in module.parameters()) / 1e6
-                    })
-        
-        # Sort by parameter count
-        layer_info.sort(key=lambda x: x['params'], reverse=True)
-        summary['layer_analysis'] = layer_info[:20]  # Top 20 layers
-        
-        return summary
     
     def profile_memory_usage(self, num_steps: int = 3) -> str:
-        """Detailed memory profiling with PyTorch memory snapshots"""
-        print(f"\n🧠 Starting memory profiling for {num_steps} steps...")
+        """Profile memory usage and generate memory snapshot"""
+        print(f"🧠 Memory profiling: {num_steps} steps")
         
-        # Create profiling directory
         profile_dir = os.path.join(self.checkpoint_dir, 'profiling')
         os.makedirs(profile_dir, exist_ok=True)
         
-        # Reset memory stats
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
             torch.cuda.empty_cache()
-        
-        # Start memory history recording
-        if torch.cuda.is_available():
             torch.cuda.memory._record_memory_history(max_entries=100000)
-        
-        memory_stats = []
         
         try:
             self.model.train()
@@ -687,165 +478,37 @@ class DeepSeekTrainerV2:
                 if step >= num_steps:
                     break
                 
-                step_stats = {'step': step}
-                
-                # Get batch data
                 input_ids = batch['input_ids'].to(self.device)
                 targets = batch['targets'].to(self.device)
                 
-                # Before forward pass
-                step_stats['before_forward'] = self.get_gpu_stats()
+                if self.scaler is not None:
+                    with autocast('cuda'):
+                        _, loss = self.model(input_ids, targets)
+                    self.scaler.scale(loss).backward()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    _, loss = self.model(input_ids, targets)
+                    loss.backward()
+                    self.optimizer.step()
                 
-                # Forward pass
-                with self.timer('forward_pass'):
-                    if self.scaler is not None:
-                        with autocast('cuda'):
-                            logits, loss = self.model(input_ids, targets)
-                    else:
-                        logits, loss = self.model(input_ids, targets)
-                
-                step_stats['after_forward'] = self.get_gpu_stats()
-                
-                # Backward pass
-                with self.timer('backward_pass'):
-                    if self.scaler is not None:
-                        self.scaler.scale(loss).backward()
-                    else:
-                        loss.backward()
-                
-                step_stats['after_backward'] = self.get_gpu_stats()
-                
-                # Optimizer step
-                with self.timer('optimizer_step'):
-                    if self.scaler is not None:
-                        self.scaler.step(self.optimizer)
-                        self.scaler.update()
-                    else:
-                        self.optimizer.step()
-                    self.optimizer.zero_grad(set_to_none=True)  # Memory efficient
-                
-                step_stats['after_optimizer'] = self.get_gpu_stats()
-                step_stats['loss'] = loss.item()
-                
-                memory_stats.append(step_stats)
-                
-                # Print progress
-                if step % 2 == 0:
-                    current_mem = step_stats['after_optimizer'].get('torch_allocated_gb', 0)
-                    peak_mem = step_stats['after_optimizer'].get('torch_max_allocated_gb', 0)
-                    print(f"  Step {step}: Loss {loss.item():.4f}, Current: {current_mem:.2f}GB, Peak: {peak_mem:.2f}GB")
+                self.optimizer.zero_grad(set_to_none=True)
         
         finally:
-            # Save memory snapshot
             if torch.cuda.is_available():
                 snapshot_file = os.path.join(profile_dir, f'memory_snapshot_{int(time.time())}.pkl')
                 try:
                     torch.cuda.memory._dump_snapshot(snapshot_file)
-                    print(f"\n📁 Memory snapshot saved: {snapshot_file}")
-                    print(f"🌐 Upload to https://pytorch.org/memory_viz for interactive analysis")
+                    print(f"📁 Memory snapshot: {snapshot_file}")
+                    print(f"🌐 Upload to https://pytorch.org/memory_viz")
                 except Exception as e:
-                    print(f"⚠️  Could not save memory snapshot: {e}")
+                    print(f"⚠️  Memory snapshot failed: {e}")
                     snapshot_file = "N/A"
                 
                 torch.cuda.memory._record_memory_history(enabled=None)
         
-        # Analyze memory patterns
-        analysis = self._analyze_memory_patterns(memory_stats, snapshot_file)
-        return analysis
+        return snapshot_file
     
-    def _analyze_memory_patterns(self, memory_stats: list, snapshot_file: str) -> str:
-        """Analyze memory usage patterns"""
-        analysis_lines = []
-        analysis_lines.append("\n" + "="*60)
-        analysis_lines.append("🧠 MEMORY ANALYSIS REPORT")
-        analysis_lines.append("="*60)
-        
-        if not memory_stats:
-            analysis_lines.append("No memory statistics collected.")
-            return "\n".join(analysis_lines)
-        
-        # Extract memory trends
-        peak_memories = []
-        forward_memories = []
-        backward_memories = []
-        
-        for stats in memory_stats:
-            if 'after_optimizer' in stats and 'torch_max_allocated_gb' in stats['after_optimizer']:
-                peak_memories.append(stats['after_optimizer']['torch_max_allocated_gb'])
-            
-            if 'after_forward' in stats and 'torch_allocated_gb' in stats['after_forward']:
-                forward_memories.append(stats['after_forward']['torch_allocated_gb'])
-            
-            if 'after_backward' in stats and 'torch_allocated_gb' in stats['after_backward']:
-                backward_memories.append(stats['after_backward']['torch_allocated_gb'])
-        
-        # Memory statistics
-        if peak_memories:
-            max_peak = max(peak_memories)
-            avg_forward = sum(forward_memories) / len(forward_memories) if forward_memories else 0
-            avg_backward = sum(backward_memories) / len(backward_memories) if backward_memories else 0
-            
-            analysis_lines.append(f"\n📊 Memory Usage Statistics:")
-            analysis_lines.append(f"  Peak GPU memory: {max_peak:.2f}GB")
-            analysis_lines.append(f"  Average after forward: {avg_forward:.2f}GB")
-            analysis_lines.append(f"  Average after backward: {avg_backward:.2f}GB")
-            analysis_lines.append(f"  Memory increase (forward → backward): {avg_backward - avg_forward:.2f}GB")
-        
-        # Memory growth analysis
-        if len(peak_memories) > 1:
-            initial_peak = peak_memories[0]
-            final_peak = peak_memories[-1]
-            memory_growth = final_peak - initial_peak
-            
-            analysis_lines.append(f"\n📈 Memory Growth Analysis:")
-            analysis_lines.append(f"  Initial peak: {initial_peak:.2f}GB")
-            analysis_lines.append(f"  Final peak: {final_peak:.2f}GB")
-            analysis_lines.append(f"  Memory growth: {memory_growth:.2f}GB")
-            
-            if memory_growth > 0.1:
-                analysis_lines.append(f"  ⚠️  Significant memory growth detected - possible memory leak")
-            else:
-                analysis_lines.append(f"  ✅ Stable memory usage - no significant growth")
-        
-        # Memory efficiency recommendations
-        analysis_lines.append(f"\n💡 Memory Optimization Recommendations:")
-        
-        if max_peak > 0:
-            if max_peak > 20:
-                analysis_lines.append(f"  🔴 HIGH memory usage ({max_peak:.1f}GB) - Consider:")
-                analysis_lines.append(f"     - Reduce batch size")
-                analysis_lines.append(f"     - Enable gradient checkpointing")
-                analysis_lines.append(f"     - Use activation checkpointing for transformer blocks")
-            elif max_peak > 10:
-                analysis_lines.append(f"  🟡 MODERATE memory usage ({max_peak:.1f}GB) - Consider:")
-                analysis_lines.append(f"     - Optimize attention mechanisms")
-                analysis_lines.append(f"     - Reduce MoE experts if possible")
-            else:
-                analysis_lines.append(f"  🟢 GOOD memory usage ({max_peak:.1f}GB) - Room for:")
-                analysis_lines.append(f"     - Larger batch sizes")
-                analysis_lines.append(f"     - Longer context lengths")
-        
-        # Analysis files
-        analysis_lines.append(f"\n📁 Memory Analysis Files:")
-        analysis_lines.append(f"  Memory snapshot: {snapshot_file}")
-        analysis_lines.append(f"  Interactive viewer: https://pytorch.org/memory_viz")
-        
-        analysis_text = "\n".join(analysis_lines)
-        
-        # Save analysis
-        analysis_file = os.path.join(os.path.dirname(snapshot_file) if snapshot_file != "N/A" else self.checkpoint_dir, 
-                                   f'memory_analysis_{int(time.time())}.txt')
-        try:
-            with open(analysis_file, 'w') as f:
-                f.write(analysis_text)
-            print(f"\n📄 Memory analysis saved to: {analysis_file}")
-        except Exception as e:
-            print(f"⚠️  Could not save memory analysis: {e}")
-        
-        print(analysis_text)
-        return analysis_text
-
-
 # Legacy function for compatibility
 def create_deepseek_trainer(*args, **kwargs):
     """Create trainer (legacy compatibility)"""
