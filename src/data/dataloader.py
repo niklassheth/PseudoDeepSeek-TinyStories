@@ -81,7 +81,7 @@ def create_dataloaders(
             tokenize_batch,
             batched=True,
             batch_size=1000,
-            num_proc=cpu_count(),
+            num_proc=min(cpu_count(), 16),
             remove_columns=["text"]
         )
         
