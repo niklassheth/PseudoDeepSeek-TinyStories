@@ -31,7 +31,7 @@ class ModelConfig:
     moe_aux_loss_coeff: float = 0.01
     
     # Multi-token prediction
-    multi_token_predict: int = 2
+    multi_token_predict: int = 0
     
     # Quantization
     use_quantization: bool = False
