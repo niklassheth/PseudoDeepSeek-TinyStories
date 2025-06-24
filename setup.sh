@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# DeepSeek Children's Stories Model Setup Script
+# Updated for new TinyStories dataset and modern DataLoader system
+# No dataset preprocessing needed - downloads TinyStories automatically
+
 # Colors for output
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -91,38 +95,25 @@ setup_virtual_env() {
     pip install -r requirements.txt || handle_error "Failed to install requirements"
 }
 
-# Function to prepare dataset
-prepare_dataset() {
-    print_status "Preparing dataset..."
+# Function to test dataloader
+test_dataloader() {
+    print_status "Testing TinyStories dataloader..."
     cd "${PROJECT_ROOT}" || handle_error "Failed to change to project directory"
     
-    # Create a Python script to process the data
-    cat > process_data.py << 'EOF'
-import os
+    # Test the new dataloader system
+    python3 -c "
 import sys
-
-# Add the src directory to Python path
-sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
-
-from data.data_processor import DeepSeekDataProcessor
-
-def main():
-    print("[+] Processing dataset into binary files...")
-    processor = DeepSeekDataProcessor()
-    processor.prepare_dataset()
-    print("[+] Data processing completed successfully!")
-
-if __name__ == "__main__":
-    main()
-EOF
-
-    # Run the data processing script
-    python3 process_data.py || handle_error "Failed to process dataset"
-    
-    # Verify the files were created
-    if [ ! -f "${PROJECT_ROOT}/src/data/train.bin" ] || [ ! -f "${PROJECT_ROOT}/src/data/validation.bin" ]; then
-        handle_error "Data processing failed - required files not created"
-    fi
+sys.path.append('src')
+from data.dataloader import create_dataloaders
+print('[+] Testing TinyStories dataloader...')
+try:
+    dataloaders = create_dataloaders(batch_size=4, num_workers=1)
+    print('[+] DataLoader test successful!')
+    print('[+] TinyStories dataset will be downloaded automatically during training.')
+except Exception as e:
+    print(f'[-] DataLoader test failed: {e}')
+    exit(1)
+" || handle_error "DataLoader test failed"
 }
 
 # Function to train base model
@@ -130,18 +121,9 @@ train_base_model() {
     print_status "Starting DeepSeek base model training..."
     cd "${PROJECT_ROOT}" || handle_error "Failed to change to project directory"
     
-    python3 src/run_training.py \
-        --batch-size "${BATCH_SIZE:-12}" \
-        --max-iters "${MAX_ITERS:-20000}" \
-        --eval-interval "${EVAL_INTERVAL:-1000}" \
-        --eval-iters "${EVAL_ITERS:-200}" \
-        --learning-rate "${LEARNING_RATE:-6e-4}" \
-        --weight-decay "${WEIGHT_DECAY:-0.1}" \
-        --warmup-iters "${WARMUP_ITERS:-2000}" \
-        --lr-decay-iters "${LR_DECAY_ITERS:-20000}" \
-        --min-lr "${MIN_LR:-6e-5}" \
-        --moe-experts "${MOE_EXPERTS:-4}" \
-        --multi-token "${MULTI_TOKEN:-2}" || handle_error "Base model training failed"
+    # The new training system uses src/config.py for configuration
+    # No command line arguments needed - just run the training script
+    python3 src/run_training.py || handle_error "Base model training failed"
 }
 
 # Function to perform LoRA finetuning
@@ -167,7 +149,7 @@ def main():
     print("Loading base model...")
     checkpoint = torch.load('checkpoints/best_model.pt', map_location='cuda' if torch.cuda.is_available() else 'cpu')
     model = DeepSeek(checkpoint['config'])
-    model.load_state_dict(checkpoint['model'])
+    model.load_state_dict(checkpoint['model_state_dict'])
     
     # Define LoRA configuration
     lora_config = LoraConfig(
@@ -250,17 +232,18 @@ show_usage() {
     print_info "Next steps:"
     print_info "1. Activate virtual environment: source venv/bin/activate"
     print_info "2. Train the model: python src/run_training.py"
-    print_info "3. Generate stories: python src/generate.py --prompt 'your prompt'"
-    print_info "4. Interactive mode: python src/generate.py --interactive"
+    print_info "3. Test dataloader: python src/data/dataloader.py"
+    print_info "4. Generate stories: python src/generate.py --prompt 'your prompt'"
     print_info ""
     print_info "Model files:"
-    print_info "- Base model: checkpoints/best_model.pt"
-    print_info "- LoRA model: lora_checkpoints/best_lora_model.pt"
+    print_info "- Best model: checkpoints/best_model.pt"
+    print_info "- Epoch checkpoints: checkpoints/checkpoint_epoch_*.pt"
     print_info ""
-    print_info "Configuration options:"
-    print_info "- Adjust model size: --n-layer, --n-head, --n-embd"
-    print_info "- Training parameters: --batch-size, --learning-rate, --max-iters"
-    print_info "- Advanced features: --moe-experts, --multi-token"
+    print_info "Configuration:"
+    print_info "- Edit src/config.py to change model/training parameters"
+    print_info "- Uses TinyStories dataset (downloads automatically)"
+    print_info "- Modern epoch-based training with DataLoader"
+    print_info "- Memory-efficient streaming mode"
 }
 
 # Main setup function
@@ -291,8 +274,8 @@ main() {
     # Setup virtual environment
     setup_virtual_env
     
-    # Prepare dataset
-    prepare_dataset
+    # Test dataloader (no dataset preparation needed - downloads automatically)
+    test_dataloader
     
     # Train base model
     train_base_model
