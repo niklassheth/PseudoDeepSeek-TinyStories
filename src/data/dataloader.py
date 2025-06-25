@@ -76,12 +76,15 @@ def create_dataloaders(
         # Load dataset
         dataset = cast(Dataset, load_dataset(dataset_name, split=split_name))
         
+
+        cores = min(cpu_count(), 16)
+        filtered_dataset = dataset.filter(lambda x: len(x["text"]) > 32, num_proc=cores)
         # Fast batch tokenization
-        tokenized_dataset = dataset.map(
+        tokenized_dataset = filtered_dataset.map(
             tokenize_batch,
             batched=True,
-            batch_size=1000,
-            num_proc=min(cpu_count(), 16),
+            batch_size=128,
+            num_proc=cores,
             remove_columns=["text"]
         )
         

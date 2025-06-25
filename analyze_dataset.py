@@ -51,6 +51,7 @@ def analyze_dataset(max_samples: int = 50000, batch_size: int = 64):
     total_tokens = 0
     samples_processed = 0
     extreme_sequences = {'very_long': [], 'very_short': []}  # Store extreme examples
+    non_ascii_sequences = []  # Store sequences with non-ASCII characters
     max_examples = 3
     
     print(f"\n📈 Processing batches...")
@@ -87,6 +88,20 @@ def analyze_dataset(max_samples: int = 50000, batch_size: int = 64):
                         'length': seq_len,
                         'text': decoded_text
                     })
+                except:
+                    pass
+            
+            # Check for non-ASCII characters
+            if len(non_ascii_sequences) < max_examples:
+                try:
+                    decoded_text = tokenizer.decode(tokens)
+                    # Check if text contains non-ASCII characters
+                    if any(ord(char) > 127 for char in decoded_text):
+                        non_ascii_sequences.append({
+                            'length': seq_len,
+                            'text': decoded_text[:300] + "..." if len(decoded_text) > 300 else decoded_text,
+                            'non_ascii_chars': [char for char in decoded_text if ord(char) > 127][:20]  # Show first 20
+                        })
                 except:
                     pass
             
@@ -379,6 +394,24 @@ def analyze_dataset(max_samples: int = 50000, batch_size: int = 64):
     else:
         print(f"\n📏 No sequences <50 tokens found in sample")
     
+    # Show non-ASCII character examples
+    if non_ascii_sequences:
+        print(f"\n" + "="*50)
+        print("🌍 NON-ASCII CHARACTER EXAMPLES")
+        print("="*50)
+        print(f"\n🔍 Sequences with Non-ASCII Characters:")
+        for i, seq in enumerate(non_ascii_sequences):
+            print(f"\n  Example {i+1} (Length: {seq['length']} tokens):")
+            print(f"  Non-ASCII chars found: {seq['non_ascii_chars']}")
+            print(f"  {'-'*60}")
+            print(f"  {seq['text']}")
+            print(f"  {'-'*60}")
+    else:
+        print(f"\n" + "="*50)
+        print("🌍 NON-ASCII CHARACTER ANALYSIS")
+        print("="*50)
+        print(f"\n✅ No non-ASCII characters found in analyzed samples")
+    
     return {
         'sequence_lengths': seq_lengths,
         'token_counts': token_counts,
@@ -387,6 +420,7 @@ def analyze_dataset(max_samples: int = 50000, batch_size: int = 64):
         'single_tokens': single_tokens,
         'rare_token_counts': rare_token_counts,
         'extreme_sequences': extreme_sequences,
+        'non_ascii_sequences': non_ascii_sequences,
         'vocab_utilization': len(used_tokens) / vocab_size,
         'effective_vocab_90': idx_90,
         'effective_vocab_99': idx_99
@@ -395,5 +429,5 @@ def analyze_dataset(max_samples: int = 50000, batch_size: int = 64):
 
 if __name__ == "__main__":
     # Run analysis
-    results = analyze_dataset(max_samples=50000, batch_size=64)
+    results = analyze_dataset(max_samples=float("inf"), batch_size=64)
     print("\n✅ Analysis complete!")

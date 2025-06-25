@@ -17,35 +17,84 @@ from typing import Optional, Tuple, List
 from dataclasses import dataclass
 
 
-@dataclass
 class DeepSeekConfig:
-    """Configuration for DeepSeek model optimized for children's stories"""
-    vocab_size: int = 50257  # GPT-2 vocabulary size
-    n_layer: int = 6         # Reduced for efficiency
-    n_head: int = 8          # Number of attention heads
-    n_embd: int = 512        # Embedding dimension
-    block_size: int = 1024   # Context window
-    dropout: float = 0.1     # Dropout rate
-    bias: bool = True        # Use bias in linear layers
+    """Configuration for DeepSeek model"""
     
-    # MLA (Multihead Latent Attention) config
-    use_mla: bool = True     # Enable MLA
-    mla_kv_heads: int = 4    # Number of key-value heads for MLA
-    mla_q_proj_dim: int = 32  # Query projection dimension
-    mla_kv_proj_dim: int = 16  # Key-value projection dimension
-    
-    # MoE (Mixture of Experts) config
-    moe_num_experts: int = 4  # Number of experts
-    moe_top_k: int = 2       # Number of experts per token
-    moe_expert_capacity: float = 1.25
-    moe_aux_loss_coeff: float = 0.01
-    
-    # Multi-token prediction
-    multi_token_predict: int = 2  # Predict next 2 tokens for children's stories
-    
-    # Quantization
-    use_quantization: bool = False
-    quantization_bits: int = 8
+    def __init__(
+        self,
+        vocab_size: int = 50257,
+        n_layer: int = 12,
+        n_head: int = 12,
+        n_embd: int = 768,
+        block_size: int = 1024,
+        bias: bool = True,
+        dropout: float = 0.0,
+        
+        # MLA parameters
+        use_mla: bool = True,
+        mla_latent_dim: int = 256,
+        mla_kv_compression_dim: int = 512,
+        mla_q_rope_compression_dim: int = 768,
+        
+        # MoE parameters
+        moe_num_experts: int = 8,
+        moe_top_k: int = 2,
+        moe_expert_capacity: int = 128,  # Not used in new implementation
+        moe_aux_loss_coeff: float = 0.01,
+        moe_router_z_loss_coeff: float = 0.001,
+        
+        # New MoE parameters
+        moe_use_noisy_top_k: bool = False,
+        moe_train_capacity: float = 1.25,
+        moe_eval_capacity: float = 2.0,
+        moe_min_capacity: int = 4,
+        moe_router_use_full_prec: bool = True,
+        moe_use_aux_loss: bool = True,
+        moe_use_router_z_loss: bool = True,
+        moe_fixed_capacity: Optional[int] = None,  # For torch.compile
+        expected_batch_size: int = 16,  # For computing fixed capacity
+        
+        # Multi-token prediction
+        multi_token_predict: int = 0,
+        
+        # Quantization
+        use_quantization: bool = False,
+    ):
+        self.vocab_size = vocab_size
+        self.n_layer = n_layer
+        self.n_head = n_head
+        self.n_embd = n_embd
+        self.block_size = block_size
+        self.bias = bias
+        self.dropout = dropout
+        
+        # MLA
+        self.use_mla = use_mla
+        self.mla_latent_dim = mla_latent_dim
+        self.mla_kv_compression_dim = mla_kv_compression_dim
+        self.mla_q_rope_compression_dim = mla_q_rope_compression_dim
+        
+        # MoE
+        self.moe_num_experts = moe_num_experts
+        self.moe_top_k = moe_top_k
+        self.moe_expert_capacity = moe_expert_capacity
+        self.moe_aux_loss_coeff = moe_aux_loss_coeff
+        self.moe_router_z_loss_coeff = moe_router_z_loss_coeff
+        
+        # New MoE parameters
+        self.moe_use_noisy_top_k = moe_use_noisy_top_k
+        self.moe_train_capacity = moe_train_capacity
+        self.moe_eval_capacity = moe_eval_capacity
+        self.moe_min_capacity = moe_min_capacity
+        self.moe_router_use_full_prec = moe_router_use_full_prec
+        self.moe_use_aux_loss = moe_use_aux_loss
+        self.moe_use_router_z_loss = moe_use_router_z_loss
+        
+        # Multi-token
+        self.multi_token_predict = multi_token_predict
+        
+        # Quantization
+        self.use_quantization = use_quantization
 
 
 class RoPEPositionalEncoding(nn.Module):
@@ -201,94 +250,278 @@ class MultiheadLatentAttention(nn.Module):
         
         return out
 
+from typing import Optional
+import math
+from contextlib import nullcontext
 
-class MoEExpert(nn.Module):
-    """Expert network for Mixture of Experts"""
+
+class MOEManager:
+    """
+    Basic wrapper class for tracking, storing, and aggregating auxiliary
+    losses across multiple MoE layers in the model
+    """
+    def __init__(self):
+        self.aux_loss = []
+        self.router_z_loss = []
     
-    def __init__(self, config: DeepSeekConfig):
+    def reset_aux_loss(self):
+        self.aux_loss = []
+    
+    def reset_router_z_loss(self):
+        self.router_z_loss = []
+    
+    def add_aux_loss(self, loss):
+        self.aux_loss.append(loss)
+    
+    def add_router_z_loss(self, loss):
+        self.router_z_loss.append(loss)
+    
+    def aggregate_aux_loss(self):
+        return sum(self.aux_loss)
+    
+    def aggregate_router_z_loss(self):
+        return sum(self.router_z_loss)
+
+
+MANAGER = MOEManager()
+
+
+class Router(nn.Module):
+    def __init__(self, config):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
-        self.gelu = nn.GELU()
-        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
-        self.dropout = nn.Dropout(config.dropout)
+        
+        # Router settings - map from your config
+        self.top_k = config.moe_top_k
+        self.n_exp = config.moe_num_experts
+        assert self.top_k >= 1 and self.top_k <= self.n_exp
+        
+        # Optional features (add these to your config if needed)
+        self.use_noisy_top_k = getattr(config, 'moe_use_noisy_top_k', False)
+        self.train_capacity = getattr(config, 'moe_train_capacity', 1.25)
+        self.eval_capacity = getattr(config, 'moe_eval_capacity', 2.0)
+        self.min_capacity = getattr(config, 'moe_min_capacity', 4)
+        self.router_use_full_prec = getattr(config, 'moe_router_use_full_prec', True)
+        
+        # Auxiliary loss settings
+        self.use_aux_loss = getattr(config, 'moe_use_aux_loss', True)
+        self.use_router_z_loss = getattr(config, 'moe_use_router_z_loss', False)
+        
+        # For torch.compile compatibility - fix capacity
+        self.fixed_capacity = getattr(config, 'moe_fixed_capacity', None)
+        if self.fixed_capacity is None:
+            # Compute a reasonable fixed capacity based on expected batch size
+            expected_batch_size = getattr(config, 'expected_batch_size', 16)
+            expected_seq_len = getattr(config, 'block_size', 1024)
+            expected_tokens = expected_batch_size * expected_seq_len
+            self.fixed_capacity = self._compute_capacity(expected_tokens, self.train_capacity)
+        
+        # Linear projection for (noisy) softmax gating
+        self.w_g = nn.Linear(config.n_embd, self.n_exp, bias=False)
+        self.w_noise = nn.Linear(config.n_embd, self.n_exp, bias=False) if self.use_noisy_top_k else None
     
-    def forward(self, x: torch.Tensor):
-        return self.dropout(self.c_proj(self.gelu(self.c_fc(x))))
+    def _compute_capacity(self, tokens_per_batch, capacity_factor):
+        """Compute capacity as a Python int for initialization"""
+        capacity = int(self.top_k * capacity_factor * tokens_per_batch / self.n_exp)
+        capacity += capacity % 2  # Make even
+        capacity = max(capacity, self.min_capacity)
+        return capacity
+    
+    def forward(self, x):
+        # Optionally run router in full precision for stability
+        device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
+        ctx = nullcontext() if not self.router_use_full_prec else torch.amp.autocast(device_type=device_type, enabled=False)
+        
+        with ctx:
+            B, T, _ = x.size()
+            num_tokens = B * T
+            
+            # Router logits
+            logits = self.w_g(x)  # [B, T, n_exp]
+            if self.use_noisy_top_k and self.training:
+                noise = F.softplus(self.w_noise(x))
+                noise *= torch.randn_like(noise)
+                logits += noise
+            
+            # Router z loss
+            if self.use_router_z_loss and self.training:
+                z_loss = self.compute_router_z_loss(logits)
+                MANAGER.add_router_z_loss(z_loss)
+            
+            # Find top k experts
+            top_k_logits, top_k_indices = logits.topk(self.top_k, dim=-1)  # [B, T, k]
+            
+            # Normalize expert probabilities over top-k only
+            router_probs = torch.full_like(logits, float('-inf'))  # [B, T, n_exp]
+            router_probs.scatter_(-1, top_k_indices, top_k_logits)
+            router_probs = F.softmax(router_probs, dim=-1)
+            
+            # Auxiliary load balancing loss
+            if self.use_aux_loss and self.training:
+                aux_loss = self.compute_aux_loss(router_probs, top_k_indices)
+                MANAGER.add_aux_loss(aux_loss)
+            
+            # Compute expert capacity
+            exp_capacity = self.get_capacity(num_tokens)
+            
+            # Multi-hot mask of chosen experts
+            exp_mask = F.one_hot(top_k_indices, num_classes=self.n_exp)  # [B, T, k, n_exp]
+            exp_mask = exp_mask.view(num_tokens, self.top_k, self.n_exp)  # [B * T, k, n_exp]
+            exp_mask = exp_mask.permute(1, 0, 2)  # [k, B * T, n_exp]
+            
+            # Compute cumulative sum for token ranking within experts
+            exp_rank = exp_mask.reshape(self.top_k * num_tokens, self.n_exp)  # [k * B * T, n_exp]
+            exp_rank = torch.cumsum(exp_rank, dim=0) - 1
+            exp_rank = exp_rank.reshape(self.top_k, num_tokens, self.n_exp)  # [k, B * T, n_exp]
+            
+            # Mask out entries beyond capacity
+            exp_mask *= torch.lt(exp_rank, exp_capacity)  # [k, B * T, n_exp]
+            used_capacity = torch.sum(exp_mask, dim=(0, 1))  # [n_exp]
+            
+            # Get position of each token in its expert's batch
+            exp_rank = torch.sum(exp_mask * exp_rank, dim=-1)  # [k, B * T]
+            
+            # Mask probabilities to only include selected experts
+            router_probs = router_probs.view(num_tokens, self.n_exp)[None, :]  # [1, B * T, n_exp]
+            exp_weights = exp_mask * router_probs  # [k, B * T, n_exp]
+            
+            # Convert rank to one-hot over capacity
+            exp_rank_sc = F.one_hot(exp_rank, num_classes=exp_capacity)  # [k, B * T, exp_capacity]
+            
+            # Create weight matrix for combine operation
+            cb_weight = torch.sum(exp_weights.unsqueeze(3) * exp_rank_sc.unsqueeze(2), dim=0)
+            sec_mask = cb_weight.bool()
+            
+            return used_capacity, cb_weight, sec_mask
+    
+    def compute_aux_loss(self, expert_probs: torch.Tensor, indices: torch.Tensor):
+        """Switch Transformer auxiliary loss for load balancing"""
+        with torch.no_grad():
+            one_hot_indices = F.one_hot(indices, num_classes=self.n_exp)
+            one_hot_indices = torch.sum(one_hot_indices.float(), dim=2)
+            tokens_per_expert = torch.mean(one_hot_indices.float(), dim=(0, 1))
+        
+        prob_per_expert = torch.mean(expert_probs.float(), dim=(0, 1))
+        return self.n_exp * torch.sum(prob_per_expert * tokens_per_expert)
+    
+    def compute_router_z_loss(self, logits: torch.Tensor):
+        """ST-MoE router z loss to prevent logit explosion"""
+        z_loss = torch.logsumexp(logits, dim=-1) ** 2.0
+        return torch.mean(z_loss)
+    
+    def get_capacity(self, tokens_per_batch):
+        capacity_factor = self.train_capacity if self.training else self.eval_capacity
+        
+        # Use torch operations instead of Python math to stay in graph
+        capacity = torch.floor(self.top_k * capacity_factor * tokens_per_batch / self.n_exp)
+        capacity = capacity + (capacity % 2)  # Make even
+        capacity = torch.clamp(capacity, min=self.min_capacity)
+        
+        # For torch.compile compatibility, we need a fixed capacity
+        # Option 1: Use a fixed capacity based on expected batch size
+        if hasattr(self, '_fixed_capacity'):
+            return self._fixed_capacity
+        
+        # Option 2: Return as tensor for dynamic shapes
+        return capacity.int()
+
+
+class MLPExperts(nn.Module):
+    """
+    Batched MLP experts - processes all experts in parallel using bmm
+    """
+    def __init__(self, config):
+        super().__init__()
+        self.bias = config.bias
+        self.n_exp = config.moe_num_experts
+        self.n_embd = config.n_embd
+        self.dropout = config.dropout
+        
+        # Initialize expert weights
+        self.c_fc = nn.Parameter(torch.empty(self.n_exp, self.n_embd, 4 * self.n_embd))
+        self.c_proj = nn.Parameter(torch.empty(self.n_exp, 4 * self.n_embd, self.n_embd))
+        
+        if self.bias:
+            self.fc_bias = nn.Parameter(torch.empty(self.n_exp, 1, 4 * self.n_embd))
+            self.proj_bias = nn.Parameter(torch.empty(self.n_exp, 1, self.n_embd))
+        else:
+            self.fc_bias = None
+            self.proj_bias = None
+        
+        self.gelu = nn.GELU()
+        self.dropout_layer = nn.Dropout(self.dropout)
+        
+        # Initialize weights
+        self._init_weights()
+    
+    def _init_weights(self):
+        # Standard initialization for linear layers
+        nn.init.normal_(self.c_fc, mean=0.0, std=0.02)
+        nn.init.normal_(self.c_proj, mean=0.0, std=0.02)
+        if self.bias:
+            nn.init.zeros_(self.fc_bias)
+            nn.init.zeros_(self.proj_bias)
+    
+    def forward(self, x):
+        # x shape: [n_exp, exp_capacity, n_embd]
+        x = torch.bmm(x, self.c_fc)
+        if self.bias:
+            x += self.fc_bias
+        x = self.gelu(x)
+        x = torch.bmm(x, self.c_proj)
+        if self.bias:
+            x += self.proj_bias
+        x = self.dropout_layer(x)
+        return x
 
 
 class MixtureOfExperts(nn.Module):
-    """Mixture of Experts (MoE) for increased model capacity"""
-    
-    def __init__(self, config: DeepSeekConfig):
+    """
+    Efficient Mixture of Experts implementation with batched processing
+    """
+    def __init__(self, config):
         super().__init__()
         self.config = config
-        self.num_experts = config.moe_num_experts
-        self.top_k = config.moe_top_k
-        self.expert_capacity = config.moe_expert_capacity
+        self.router = Router(config)
+        self.experts = MLPExperts(config)
         
-        # Router
-        self.router = nn.Linear(config.n_embd, config.moe_num_experts, bias=False)
-        
-        # Experts
-        self.experts = nn.ModuleList([MoEExpert(config) for _ in range(config.moe_num_experts)])
-        
-        # Layer norm
+        # Layer norm after MoE (as in your original)
         self.ln = nn.LayerNorm(config.n_embd, bias=config.bias)
     
     def forward(self, x: torch.Tensor):
-        batch_size, seq_len, hidden_dim = x.shape
+        B, T, n_embd = x.size()
+        num_tokens = B * T
         
-        # Get router logits
-        router_logits = self.router(x)  # [B, T, num_experts]
+        # Pass through router
+        used_capacity, exp_weight, exp_mask = self.router(x)
         
-        # Get top-k experts
-        top_k_logits, top_k_indices = torch.topk(router_logits, self.top_k, dim=-1)
-        top_k_probs = F.softmax(top_k_logits, dim=-1)
+        # Flatten input
+        x_flat = x.view(num_tokens, n_embd)
         
-        # Initialize output
-        output = torch.zeros_like(x)
+        # Reshape tokens into batches for each expert
+        # [n_exp, exp_capacity, B * T] @ [B * T, n_embd] -> [n_exp, exp_capacity, n_embd]
+        exp_batches = exp_mask.permute(1, 2, 0).type_as(x_flat) @ x_flat
         
-        # Process each expert
-        for expert_idx in range(self.num_experts):
-            # Find tokens that use this expert
-            expert_mask = (top_k_indices == expert_idx).any(dim=-1)  # [B, T]
-            
-            if expert_mask.any():
-                # Get tokens for this expert
-                expert_tokens = x[expert_mask]  # [num_tokens, hidden_dim]
-                
-                # Get routing weights for this expert
-                expert_weights = top_k_probs[expert_mask]  # [num_tokens, top_k]
-                expert_weights = expert_weights[top_k_indices[expert_mask] == expert_idx]  # [num_tokens]
-                
-                # Apply expert
-                expert_output = self.experts[expert_idx](expert_tokens)  # [num_tokens, hidden_dim]
-                
-                # Weight the output
-                weighted_output = expert_output * expert_weights.unsqueeze(-1)
-                
-                # Add to output
-                output[expert_mask] += weighted_output
+        # Compute expert outputs
+        exp_out = self.experts(exp_batches)  # [n_exp, exp_capacity, n_embd]
         
-        # Apply layer norm
+        # Aggregate expert outputs based on router weights
+        exp_weight = exp_weight.view(num_tokens, -1)  # [B * T, n_exp * exp_capacity]
+        exp_out = exp_out.view(-1, n_embd)  # [n_exp * exp_capacity, n_embd]
+        output = exp_weight @ exp_out  # [B * T, n_embd]
+        
+        # Reshape and apply layer norm
+        output = output.view(B, T, n_embd)
         output = self.ln(output)
         
-        return output, router_logits
-    
-    def _compute_aux_loss(self, router_logits: torch.Tensor):
-        """Compute auxiliary loss for load balancing"""
-        router_probs = F.softmax(router_logits, dim=-1)
-        mean_expert_usage = router_probs.mean(dim=[0, 1])  # [num_experts]
-        target_usage = 1.0 / self.num_experts
-        
-        aux_loss = torch.sum((mean_expert_usage - target_usage) ** 2)
-        return aux_loss
+        # Return output and router logits (for compatibility with your DeepSeekBlock)
+        # Note: router logits are already used for aux losses inside the router
+        return output, None  # Second return value for compatibility
 
 
 class DeepSeekBlock(nn.Module):
     """DeepSeek transformer block with MLA and MoE"""
     
-    def __init__(self, config: DeepSeekConfig):
+    def __init__(self, config):
         super().__init__()
         self.config = config
         
@@ -309,7 +542,7 @@ class DeepSeekBlock(nn.Module):
                 batch_first=True
             )
         
-        # MoE
+        # MoE with efficient implementation
         self.moe = MixtureOfExperts(config)
     
     def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
@@ -321,11 +554,161 @@ class DeepSeekBlock(nn.Module):
             x = x + attn_out
         
         # MoE with residual connection
-        moe_output, router_logits = self.moe(self.ln2(x))
+        moe_output, _ = self.moe(self.ln2(x))
         x = x + moe_output
         
-        return x, router_logits
+        return x, None  # Second return for compatibility
+    
+    def compute_aux_loss(self, expert_probs: torch.Tensor, indices: torch.Tensor):
+        """Switch Transformer auxiliary loss for load balancing"""
+        with torch.no_grad():
+            one_hot_indices = F.one_hot(indices, num_classes=self.n_exp)
+            one_hot_indices = torch.sum(one_hot_indices.float(), dim=2)
+            tokens_per_expert = torch.mean(one_hot_indices.float(), dim=(0, 1))
+        
+        prob_per_expert = torch.mean(expert_probs.float(), dim=(0, 1))
+        return self.n_exp * torch.sum(prob_per_expert * tokens_per_expert)
+    
+    def compute_router_z_loss(self, logits: torch.Tensor):
+        """ST-MoE router z loss to prevent logit explosion"""
+        z_loss = torch.logsumexp(logits, dim=-1) ** 2.0
+        return torch.mean(z_loss)
+    
+    def get_capacity(self, tokens_per_batch):
+        capacity_factor = self.train_capacity if self.training else self.eval_capacity
+        capacity = math.floor(self.top_k * capacity_factor * tokens_per_batch / self.n_exp)
+        capacity += capacity % 2  # Make even
+        capacity = max(capacity, self.min_capacity)
+        assert capacity > 0
+        return int(capacity)
 
+
+class MLPExperts(nn.Module):
+    """
+    Batched MLP experts - processes all experts in parallel using bmm
+    """
+    def __init__(self, config):
+        super().__init__()
+        self.bias = config.bias
+        self.n_exp = config.moe_num_experts
+        self.n_embd = config.n_embd
+        self.dropout = config.dropout
+        
+        # Initialize expert weights
+        self.c_fc = nn.Parameter(torch.empty(self.n_exp, self.n_embd, 4 * self.n_embd))
+        self.c_proj = nn.Parameter(torch.empty(self.n_exp, 4 * self.n_embd, self.n_embd))
+        
+        if self.bias:
+            self.fc_bias = nn.Parameter(torch.empty(self.n_exp, 1, 4 * self.n_embd))
+            self.proj_bias = nn.Parameter(torch.empty(self.n_exp, 1, self.n_embd))
+        else:
+            self.fc_bias = None
+            self.proj_bias = None
+        
+        self.gelu = nn.GELU()
+        self.dropout_layer = nn.Dropout(self.dropout)
+        
+        # Initialize weights
+        self._init_weights()
+    
+    def _init_weights(self):
+        # Standard initialization for linear layers
+        nn.init.normal_(self.c_fc, mean=0.0, std=0.02)
+        nn.init.normal_(self.c_proj, mean=0.0, std=0.02)
+    
+    def forward(self, x):
+        # x shape: [n_exp, exp_capacity, n_embd]
+        x = torch.bmm(x, self.c_fc)
+        x = self.gelu(x)
+        x = torch.bmm(x, self.c_proj)
+        x = self.dropout_layer(x)
+        return x
+
+
+class MixtureOfExperts(nn.Module):
+    """
+    Efficient Mixture of Experts implementation with batched processing
+    """
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.router = Router(config)
+        self.experts = MLPExperts(config)
+        
+        # Layer norm after MoE (as in your original)
+        self.ln = nn.LayerNorm(config.n_embd, bias=config.bias)
+    
+    def forward(self, x: torch.Tensor):
+        B, T, n_embd = x.size()
+        num_tokens = B * T
+        
+        # Pass through router
+        used_capacity, exp_weight, exp_mask = self.router(x)
+        
+        # Flatten input
+        x_flat = x.view(num_tokens, n_embd)
+        
+        # Reshape tokens into batches for each expert
+        # [n_exp, exp_capacity, B * T] @ [B * T, n_embd] -> [n_exp, exp_capacity, n_embd]
+        exp_batches = exp_mask.permute(1, 2, 0).type_as(x_flat) @ x_flat
+        
+        # Compute expert outputs
+        exp_out = self.experts(exp_batches)  # [n_exp, exp_capacity, n_embd]
+        
+        # Aggregate expert outputs based on router weights
+        exp_weight = exp_weight.view(num_tokens, -1)  # [B * T, n_exp * exp_capacity]
+        exp_out = exp_out.view(-1, n_embd)  # [n_exp * exp_capacity, n_embd]
+        output = exp_weight @ exp_out  # [B * T, n_embd]
+        
+        # Reshape and apply layer norm
+        output = output.view(B, T, n_embd)
+        output = self.ln(output)
+        
+        # Return output and router logits (for compatibility with your DeepSeekBlock)
+        # Note: router logits are already used for aux losses inside the router
+        return output, None  # Second return value for compatibility
+
+
+class DeepSeekBlock(nn.Module):
+    """DeepSeek transformer block with MLA and MoE"""
+    
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        
+        # Layer norms
+        self.ln1 = nn.LayerNorm(config.n_embd, bias=config.bias)
+        self.ln2 = nn.LayerNorm(config.n_embd, bias=config.bias)
+        
+        # Attention - use MLA if enabled, otherwise use standard attention
+        if config.use_mla:
+            self.attn = MultiheadLatentAttention(config)
+        else:
+            # Standard multihead attention as fallback
+            self.attn = nn.MultiheadAttention(
+                config.n_embd, 
+                config.n_head, 
+                dropout=config.dropout,
+                bias=config.bias,
+                batch_first=True
+            )
+        
+        # MoE with efficient implementation
+        self.moe = MixtureOfExperts(config)
+    
+    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
+        # Attention with residual connection
+        if self.config.use_mla:
+            x = x + self.attn(self.ln1(x), attention_mask)
+        else:
+            attn_out, _ = self.attn(self.ln1(x), self.ln1(x), self.ln1(x), attn_mask=attention_mask)
+            x = x + attn_out
+        
+        # MoE with residual connection
+        moe_output, _ = self.moe(self.ln2(x))
+        x = x + moe_output
+        
+        return x, None  # Second return for compatibility
 
 class MultiTokenPredictor(nn.Module):
     """Multi-token prediction head for improved training efficiency"""
@@ -416,11 +799,31 @@ class DeepSeek(nn.Module):
         # For now, just a placeholder
         pass
     
+    def _compute_multi_token_loss(self, multi_logits, targets):
+        """Compute loss for multi-token prediction"""
+        # Placeholder - implement based on your MultiTokenPredictor output format
+        loss = 0
+        for i, logits in enumerate(multi_logits):
+            # Shift targets appropriately for each prediction head
+            shifted_targets = targets[:, i+1:i+1+logits.size(1)]
+            if shifted_targets.size(1) > 0:
+                loss += F.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)),
+                    shifted_targets.reshape(-1),
+                    ignore_index=-100
+                )
+        return loss / len(multi_logits)
+    
     def forward(self, input_ids: torch.Tensor, targets: Optional[torch.Tensor] = None):
         """Forward pass"""
         device = input_ids.device
         batch_size, seq_len = input_ids.size()
         assert seq_len <= self.config.block_size
+        
+        # Reset auxiliary losses at the start of forward pass
+        if self.training:
+            MANAGER.reset_aux_loss()
+            MANAGER.reset_router_z_loss()
         
         # Position indices
         pos = torch.arange(0, seq_len, dtype=torch.long, device=device)
@@ -432,10 +835,8 @@ class DeepSeek(nn.Module):
         x = self.transformer.drop(tok_emb + pos_emb)
         
         # Forward through transformer blocks
-        router_logits_list = []
         for block in self.transformer.h:
-            x, router_logits = block(x)
-            router_logits_list.append(router_logits)
+            x, _ = block(x)  # Router logits are now handled internally
         
         # Final layer norm
         x = self.transformer.ln_f(x)
@@ -446,24 +847,34 @@ class DeepSeek(nn.Module):
                 # Multi-token prediction
                 multi_logits = self.multi_token_predictor(x)
                 loss = self._compute_multi_token_loss(multi_logits, targets)
+                logits = multi_logits  # For compatibility
             else:
                 # Standard single-token prediction
                 logits = self.lm_head(x)
-                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), 
-                                     targets.view(-1), ignore_index=-100)
+                loss = F.cross_entropy(
+                    logits.view(-1, logits.size(-1)), 
+                    targets.view(-1), 
+                    ignore_index=-100
+                )
             
-            # Add MoE auxiliary loss
-            if router_logits_list:
-                aux_loss = sum(self.transformer.h[i].moe._compute_aux_loss(router_logits_list[i])
-                              for i in range(len(router_logits_list)))
-                loss += self.config.moe_aux_loss_coeff * aux_loss
+            # Add MoE auxiliary losses from MANAGER
+            if self.training:
+                # Load balancing loss
+                aux_loss = MANAGER.aggregate_aux_loss()
+                if aux_loss > 0:
+                    loss += self.config.moe_aux_loss_coeff * aux_loss
+                
+                # Router z-loss
+                router_z_loss = MANAGER.aggregate_router_z_loss()
+                if router_z_loss > 0:
+                    loss += self.config.moe_router_z_loss_coeff * router_z_loss
             
-            return logits if self.multi_token_predictor is None else multi_logits, loss
+            return logits, loss
         else:
             # Inference mode
             logits = self.lm_head(x[:, [-1], :])
             return logits, None
-    
+
     def _compute_multi_token_loss(self, logits: torch.Tensor, targets: torch.Tensor):
         """Compute loss for multi-token prediction"""
         batch_size, num_tokens, vocab_size = logits.shape
