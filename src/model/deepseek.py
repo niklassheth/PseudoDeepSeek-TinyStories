@@ -32,6 +32,9 @@ class DeepSeekConfig:
         
         # MLA parameters
         use_mla: bool = True,
+        mla_kv_heads: int = 4,
+        mla_q_proj_dim: int = 32,
+        mla_kv_proj_dim: int = 16,
         mla_latent_dim: int = 256,
         mla_kv_compression_dim: int = 512,
         mla_q_rope_compression_dim: int = 768,
@@ -59,6 +62,7 @@ class DeepSeekConfig:
         
         # Quantization
         use_quantization: bool = False,
+        quantization_bits: int = 8,
     ):
         self.vocab_size = vocab_size
         self.n_layer = n_layer
@@ -70,6 +74,9 @@ class DeepSeekConfig:
         
         # MLA
         self.use_mla = use_mla
+        self.mla_kv_heads = mla_kv_heads
+        self.mla_q_proj_dim = mla_q_proj_dim
+        self.mla_kv_proj_dim = mla_kv_proj_dim
         self.mla_latent_dim = mla_latent_dim
         self.mla_kv_compression_dim = mla_kv_compression_dim
         self.mla_q_rope_compression_dim = mla_q_rope_compression_dim
@@ -95,6 +102,7 @@ class DeepSeekConfig:
         
         # Quantization
         self.use_quantization = use_quantization
+        self.quantization_bits = quantization_bits
 
 
 class RoPEPositionalEncoding(nn.Module):
@@ -411,10 +419,17 @@ class Router(nn.Module):
     def get_capacity(self, tokens_per_batch):
         capacity_factor = self.train_capacity if self.training else self.eval_capacity
         
+        # Convert to tensors for torch operations
+        tokens_per_batch = torch.tensor(tokens_per_batch, dtype=torch.float32)
+        top_k = torch.tensor(self.top_k, dtype=torch.float32)
+        n_exp = torch.tensor(self.n_exp, dtype=torch.float32)
+        capacity_factor = torch.tensor(capacity_factor, dtype=torch.float32)
+        min_capacity = torch.tensor(self.min_capacity, dtype=torch.float32)
+        
         # Use torch operations instead of Python math to stay in graph
-        capacity = torch.floor(self.top_k * capacity_factor * tokens_per_batch / self.n_exp)
+        capacity = torch.floor(top_k * capacity_factor * tokens_per_batch / n_exp)
         capacity = capacity + (capacity % 2)  # Make even
-        capacity = torch.clamp(capacity, min=self.min_capacity)
+        capacity = torch.clamp(capacity, min=min_capacity)
         
         # For torch.compile compatibility, we need a fixed capacity
         # Option 1: Use a fixed capacity based on expected batch size

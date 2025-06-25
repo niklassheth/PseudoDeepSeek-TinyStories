@@ -205,6 +205,7 @@ def main():
     
     # Set random seed for reproducibility
     torch.manual_seed(training_config.seed)
+    torch.set_float32_matmul_precision('high')
     if torch.cuda.is_available():
         torch.cuda.manual_seed(training_config.seed)
     
