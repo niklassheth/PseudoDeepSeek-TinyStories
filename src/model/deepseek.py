@@ -304,7 +304,7 @@ class Router(nn.Module):
         
         # Auxiliary loss settings
         self.use_aux_loss = getattr(config, 'moe_use_aux_loss', True)
-        self.use_router_z_loss = getattr(config, 'moe_use_router_z_loss', True)
+        self.use_router_z_loss = getattr(config, 'moe_use_router_z_loss', False)
         
         # For torch.compile compatibility - fix capacity
         self.fixed_capacity = getattr(config, 'moe_fixed_capacity', None)
