@@ -201,94 +201,246 @@ class MultiheadLatentAttention(nn.Module):
         
         return out
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import Optional
+import math
+from contextlib import nullcontext
 
-class MoEExpert(nn.Module):
-    """Expert network for Mixture of Experts"""
+
+class MOEManager:
+    """
+    Basic wrapper class for tracking, storing, and aggregating auxiliary
+    losses across multiple MoE layers in the model
+    """
+    def __init__(self):
+        self.aux_loss = []
+        self.router_z_loss = []
     
-    def __init__(self, config: DeepSeekConfig):
+    def reset_aux_loss(self):
+        self.aux_loss = []
+    
+    def reset_router_z_loss(self):
+        self.router_z_loss = []
+    
+    def add_aux_loss(self, loss):
+        self.aux_loss.append(loss)
+    
+    def add_router_z_loss(self, loss):
+        self.router_z_loss.append(loss)
+    
+    def aggregate_aux_loss(self):
+        return sum(self.aux_loss)
+    
+    def aggregate_router_z_loss(self):
+        return sum(self.router_z_loss)
+
+
+MANAGER = MOEManager()
+
+
+class Router(nn.Module):
+    def __init__(self, config):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
-        self.gelu = nn.GELU()
-        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
-        self.dropout = nn.Dropout(config.dropout)
+        
+        # Router settings - map from your config
+        self.top_k = config.moe_top_k
+        self.n_exp = config.moe_num_experts
+        assert self.top_k >= 1 and self.top_k <= self.n_exp
+        
+        # Optional features (add these to your config if needed)
+        self.use_noisy_top_k = getattr(config, 'moe_use_noisy_top_k', False)
+        self.train_capacity = getattr(config, 'moe_train_capacity', 1.25)
+        self.eval_capacity = getattr(config, 'moe_eval_capacity', 2.0)
+        self.min_capacity = getattr(config, 'moe_min_capacity', 4)
+        self.router_use_full_prec = getattr(config, 'moe_router_use_full_prec', True)
+        
+        # Auxiliary loss settings
+        self.use_aux_loss = getattr(config, 'moe_use_aux_loss', True)
+        self.use_router_z_loss = getattr(config, 'moe_use_router_z_loss', True)
+        
+        # Linear projection for (noisy) softmax gating
+        self.w_g = nn.Linear(config.n_embd, self.n_exp, bias=False)
+        self.w_noise = nn.Linear(config.n_embd, self.n_exp, bias=False) if self.use_noisy_top_k else None
     
-    def forward(self, x: torch.Tensor):
-        return self.dropout(self.c_proj(self.gelu(self.c_fc(x))))
+    def forward(self, x):
+        # Optionally run router in full precision for stability
+        device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
+        ctx = nullcontext() if not self.router_use_full_prec else torch.amp.autocast(device_type=device_type, enabled=False)
+        
+        with ctx:
+            B, T, _ = x.size()
+            num_tokens = B * T
+            
+            # Router logits
+            logits = self.w_g(x)  # [B, T, n_exp]
+            
+            # Router z loss
+            if self.use_router_z_loss and self.training:
+                z_loss = self.compute_router_z_loss(logits)
+                MANAGER.add_router_z_loss(z_loss)
+            
+            # Find top k experts
+            top_k_logits, top_k_indices = logits.topk(self.top_k, dim=-1)  # [B, T, k]
+            
+            # Normalize expert probabilities over top-k only
+            router_probs = torch.full_like(logits, float('-inf'))  # [B, T, n_exp]
+            router_probs.scatter_(-1, top_k_indices, top_k_logits)
+            router_probs = F.softmax(router_probs, dim=-1)
+            
+            # Auxiliary load balancing loss
+            if self.use_aux_loss and self.training:
+                aux_loss = self.compute_aux_loss(router_probs, top_k_indices)
+                MANAGER.add_aux_loss(aux_loss)
+            
+            # Compute expert capacity
+            exp_capacity = self.get_capacity(num_tokens)
+            
+            # Multi-hot mask of chosen experts
+            exp_mask = F.one_hot(top_k_indices, num_classes=self.n_exp)  # [B, T, k, n_exp]
+            exp_mask = exp_mask.view(num_tokens, self.top_k, self.n_exp)  # [B * T, k, n_exp]
+            exp_mask = exp_mask.permute(1, 0, 2)  # [k, B * T, n_exp]
+            
+            # Compute cumulative sum for token ranking within experts
+            exp_rank = exp_mask.reshape(self.top_k * num_tokens, self.n_exp)  # [k * B * T, n_exp]
+            exp_rank = torch.cumsum(exp_rank, dim=0) - 1
+            exp_rank = exp_rank.reshape(self.top_k, num_tokens, self.n_exp)  # [k, B * T, n_exp]
+            
+            # Mask out entries beyond capacity
+            exp_mask *= torch.lt(exp_rank, exp_capacity)  # [k, B * T, n_exp]
+            used_capacity = torch.sum(exp_mask, dim=(0, 1))  # [n_exp]
+            
+            # Get position of each token in its expert's batch
+            exp_rank = torch.sum(exp_mask * exp_rank, dim=-1)  # [k, B * T]
+            
+            # Mask probabilities to only include selected experts
+            router_probs = router_probs.view(num_tokens, self.n_exp)[None, :]  # [1, B * T, n_exp]
+            exp_weights = exp_mask * router_probs  # [k, B * T, n_exp]
+            
+            # Convert rank to one-hot over capacity
+            exp_rank_sc = F.one_hot(exp_rank, num_classes=exp_capacity)  # [k, B * T, exp_capacity]
+            
+            # Create weight matrix for combine operation
+            cb_weight = torch.sum(exp_weights.unsqueeze(3) * exp_rank_sc.unsqueeze(2), dim=0)
+            sec_mask = cb_weight.bool()
+            
+            return used_capacity, cb_weight, sec_mask
+    
+    def compute_aux_loss(self, expert_probs: torch.Tensor, indices: torch.Tensor):
+        """Switch Transformer auxiliary loss for load balancing"""
+        with torch.no_grad():
+            one_hot_indices = F.one_hot(indices, num_classes=self.n_exp)
+            one_hot_indices = torch.sum(one_hot_indices.float(), dim=2)
+            tokens_per_expert = torch.mean(one_hot_indices.float(), dim=(0, 1))
+        
+        prob_per_expert = torch.mean(expert_probs.float(), dim=(0, 1))
+        return self.n_exp * torch.sum(prob_per_expert * tokens_per_expert)
+    
+    def compute_router_z_loss(self, logits: torch.Tensor):
+        """ST-MoE router z loss to prevent logit explosion"""
+        z_loss = torch.logsumexp(logits, dim=-1) ** 2.0
+        return torch.mean(z_loss)
+    
+    def get_capacity(self, tokens_per_batch):
+        capacity_factor = self.train_capacity if self.training else self.eval_capacity
+        capacity = math.floor(self.top_k * capacity_factor * tokens_per_batch / self.n_exp)
+        capacity += capacity % 2  # Make even
+        capacity = max(capacity, self.min_capacity)
+        assert capacity > 0
+        return int(capacity)
+
+
+class MLPExperts(nn.Module):
+    """
+    Batched MLP experts - processes all experts in parallel using bmm
+    """
+    def __init__(self, config):
+        super().__init__()
+        self.bias = config.bias
+        self.n_exp = config.moe_num_experts
+        self.n_embd = config.n_embd
+        self.dropout = config.dropout
+        
+        # Initialize expert weights
+        self.c_fc = nn.Parameter(torch.empty(self.n_exp, self.n_embd, 4 * self.n_embd))
+        self.c_proj = nn.Parameter(torch.empty(self.n_exp, 4 * self.n_embd, self.n_embd))
+        
+        if self.bias:
+            self.fc_bias = nn.Parameter(torch.empty(self.n_exp, 1, 4 * self.n_embd))
+            self.proj_bias = nn.Parameter(torch.empty(self.n_exp, 1, self.n_embd))
+        else:
+            self.fc_bias = None
+            self.proj_bias = None
+        
+        self.gelu = nn.GELU()
+        self.dropout_layer = nn.Dropout(self.dropout)
+        
+        # Initialize weights
+        self._init_weights()
+    
+    def _init_weights(self):
+        # Standard initialization for linear layers
+        nn.init.normal_(self.c_fc, mean=0.0, std=0.02)
+        nn.init.normal_(self.c_proj, mean=0.0, std=0.02)
+    
+    def forward(self, x):
+        # x shape: [n_exp, exp_capacity, n_embd]
+        x = torch.bmm(x, self.c_fc)
+        x = self.gelu(x)
+        x = torch.bmm(x, self.c_proj)
+        x = self.dropout_layer(x)
+        return x
 
 
 class MixtureOfExperts(nn.Module):
-    """Mixture of Experts (MoE) for increased model capacity"""
-    
-    def __init__(self, config: DeepSeekConfig):
+    """
+    Efficient Mixture of Experts implementation with batched processing
+    """
+    def __init__(self, config):
         super().__init__()
         self.config = config
-        self.num_experts = config.moe_num_experts
-        self.top_k = config.moe_top_k
-        self.expert_capacity = config.moe_expert_capacity
+        self.router = Router(config)
+        self.experts = MLPExperts(config)
         
-        # Router
-        self.router = nn.Linear(config.n_embd, config.moe_num_experts, bias=False)
-        
-        # Experts
-        self.experts = nn.ModuleList([MoEExpert(config) for _ in range(config.moe_num_experts)])
-        
-        # Layer norm
+        # Layer norm after MoE (as in your original)
         self.ln = nn.LayerNorm(config.n_embd, bias=config.bias)
     
     def forward(self, x: torch.Tensor):
-        batch_size, seq_len, hidden_dim = x.shape
+        B, T, n_embd = x.size()
+        num_tokens = B * T
         
-        # Get router logits
-        router_logits = self.router(x)  # [B, T, num_experts]
+        # Pass through router
+        used_capacity, exp_weight, exp_mask = self.router(x)
         
-        # Get top-k experts
-        top_k_logits, top_k_indices = torch.topk(router_logits, self.top_k, dim=-1)
-        top_k_probs = F.softmax(top_k_logits, dim=-1)
+        # Flatten input
+        x_flat = x.view(num_tokens, n_embd)
         
-        # Initialize output
-        output = torch.zeros_like(x)
+        # Reshape tokens into batches for each expert
+        # [n_exp, exp_capacity, B * T] @ [B * T, n_embd] -> [n_exp, exp_capacity, n_embd]
+        exp_batches = exp_mask.permute(1, 2, 0).type_as(x_flat) @ x_flat
         
-        # Process each expert
-        for expert_idx in range(self.num_experts):
-            # Find tokens that use this expert
-            expert_mask = (top_k_indices == expert_idx).any(dim=-1)  # [B, T]
-            
-            if expert_mask.any():
-                # Get tokens for this expert
-                expert_tokens = x[expert_mask]  # [num_tokens, hidden_dim]
-                
-                # Get routing weights for this expert
-                expert_weights = top_k_probs[expert_mask]  # [num_tokens, top_k]
-                expert_weights = expert_weights[top_k_indices[expert_mask] == expert_idx]  # [num_tokens]
-                
-                # Apply expert
-                expert_output = self.experts[expert_idx](expert_tokens)  # [num_tokens, hidden_dim]
-                
-                # Weight the output
-                weighted_output = expert_output * expert_weights.unsqueeze(-1)
-                
-                # Add to output
-                output[expert_mask] += weighted_output
+        # Compute expert outputs
+        exp_out = self.experts(exp_batches)  # [n_exp, exp_capacity, n_embd]
         
-        # Apply layer norm
+        # Aggregate expert outputs based on router weights
+        exp_weight = exp_weight.view(num_tokens, -1)  # [B * T, n_exp * exp_capacity]
+        exp_out = exp_out.view(-1, n_embd)  # [n_exp * exp_capacity, n_embd]
+        output = exp_weight @ exp_out  # [B * T, n_embd]
+        
+        # Reshape and apply layer norm
+        output = output.view(B, T, n_embd)
         output = self.ln(output)
         
-        return output, router_logits
-    
-    def _compute_aux_loss(self, router_logits: torch.Tensor):
-        """Compute auxiliary loss for load balancing"""
-        router_probs = F.softmax(router_logits, dim=-1)
-        mean_expert_usage = router_probs.mean(dim=[0, 1])  # [num_experts]
-        target_usage = 1.0 / self.num_experts
-        
-        aux_loss = torch.sum((mean_expert_usage - target_usage) ** 2)
-        return aux_loss
+        # Return output and router logits (for compatibility with your DeepSeekBlock)
+        # Note: router logits are already used for aux losses inside the router
+        return output, None  # Second return value for compatibility
 
 
 class DeepSeekBlock(nn.Module):
     """DeepSeek transformer block with MLA and MoE"""
     
-    def __init__(self, config: DeepSeekConfig):
+    def __init__(self, config):
         super().__init__()
         self.config = config
         
@@ -309,7 +461,7 @@ class DeepSeekBlock(nn.Module):
                 batch_first=True
             )
         
-        # MoE
+        # MoE with efficient implementation
         self.moe = MixtureOfExperts(config)
     
     def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
@@ -321,11 +473,10 @@ class DeepSeekBlock(nn.Module):
             x = x + attn_out
         
         # MoE with residual connection
-        moe_output, router_logits = self.moe(self.ln2(x))
+        moe_output, _ = self.moe(self.ln2(x))
         x = x + moe_output
         
-        return x, router_logits
-
+        return x, None  # Second return for compatibility
 
 class MultiTokenPredictor(nn.Module):
     """Multi-token prediction head for improved training efficiency"""
