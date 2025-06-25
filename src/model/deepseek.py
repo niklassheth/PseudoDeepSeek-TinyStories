@@ -567,11 +567,31 @@ class DeepSeek(nn.Module):
         # For now, just a placeholder
         pass
     
+    def _compute_multi_token_loss(self, multi_logits, targets):
+        """Compute loss for multi-token prediction"""
+        # Placeholder - implement based on your MultiTokenPredictor output format
+        loss = 0
+        for i, logits in enumerate(multi_logits):
+            # Shift targets appropriately for each prediction head
+            shifted_targets = targets[:, i+1:i+1+logits.size(1)]
+            if shifted_targets.size(1) > 0:
+                loss += F.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)),
+                    shifted_targets.reshape(-1),
+                    ignore_index=-100
+                )
+        return loss / len(multi_logits)
+    
     def forward(self, input_ids: torch.Tensor, targets: Optional[torch.Tensor] = None):
         """Forward pass"""
         device = input_ids.device
         batch_size, seq_len = input_ids.size()
         assert seq_len <= self.config.block_size
+        
+        # Reset auxiliary losses at the start of forward pass
+        if self.training:
+            MANAGER.reset_aux_loss()
+            MANAGER.reset_router_z_loss()
         
         # Position indices
         pos = torch.arange(0, seq_len, dtype=torch.long, device=device)
@@ -583,10 +603,8 @@ class DeepSeek(nn.Module):
         x = self.transformer.drop(tok_emb + pos_emb)
         
         # Forward through transformer blocks
-        router_logits_list = []
         for block in self.transformer.h:
-            x, router_logits = block(x)
-            router_logits_list.append(router_logits)
+            x, _ = block(x)  # Router logits are now handled internally
         
         # Final layer norm
         x = self.transformer.ln_f(x)
@@ -597,24 +615,34 @@ class DeepSeek(nn.Module):
                 # Multi-token prediction
                 multi_logits = self.multi_token_predictor(x)
                 loss = self._compute_multi_token_loss(multi_logits, targets)
+                logits = multi_logits  # For compatibility
             else:
                 # Standard single-token prediction
                 logits = self.lm_head(x)
-                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), 
-                                     targets.view(-1), ignore_index=-100)
+                loss = F.cross_entropy(
+                    logits.view(-1, logits.size(-1)), 
+                    targets.view(-1), 
+                    ignore_index=-100
+                )
             
-            # Add MoE auxiliary loss
-            if router_logits_list:
-                aux_loss = sum(self.transformer.h[i].moe._compute_aux_loss(router_logits_list[i])
-                              for i in range(len(router_logits_list)))
-                loss += self.config.moe_aux_loss_coeff * aux_loss
+            # Add MoE auxiliary losses from MANAGER
+            if self.training:
+                # Load balancing loss
+                aux_loss = MANAGER.aggregate_aux_loss()
+                if aux_loss > 0:
+                    loss += self.config.moe_aux_loss_coeff * aux_loss
+                
+                # Router z-loss
+                router_z_loss = MANAGER.aggregate_router_z_loss()
+                if router_z_loss > 0:
+                    loss += self.config.moe_router_z_loss_coeff * router_z_loss
             
-            return logits if self.multi_token_predictor is None else multi_logits, loss
+            return logits, loss
         else:
             # Inference mode
             logits = self.lm_head(x[:, [-1], :])
             return logits, None
-    
+
     def _compute_multi_token_loss(self, logits: torch.Tensor, targets: torch.Tensor):
         """Compute loss for multi-token prediction"""
         batch_size, num_tokens, vocab_size = logits.shape
